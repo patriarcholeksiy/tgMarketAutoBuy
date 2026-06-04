@@ -12,3 +12,6 @@ sqlx = { version = "0.9.0", features = ["runtime-tokio", "postgres", "macros"] }
 ferogram = { version = "0.6.0", features = ["serde"] }
 wreq = { version = "6.0.0-rc.28", features = ["cookies", "json"] }
 wreq-util = "3.0.0-rc.11"
+tracing = "0.1"
+tracing-subscriber = { version = "0.3", features = ["env-filter", "registry"] }
+tracing-appender = "0.2"
