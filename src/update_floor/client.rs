@@ -1,22 +1,37 @@
 use crate::models::{Backdrop, Collection, Model};
-use crate::update_floor::db::{bulk_update_backdrops, bulk_update_models, fetch_all_collections, fetch_all_short_titles, fetch_all_tg_ids, fetch_collections_without_models, get_all_backdrops_item, get_all_models_item, save_new_backdrops, save_new_collections, save_new_models, PriceUpdateBackdrop, PriceUpdateModel};
-use crate::update_floor::payload::{BybitResponse, CollectionPortals, PortalsResponse, PortalsResponseMap, XGiftResponse, XGiftResponseMap};
+use crate::update_floor::db::{bulk_update_backdrops, bulk_update_models, fetch_all_collections, fetch_all_tg_ids, fetch_collections_without_models, get_all_backdrops_item, get_all_models_item, save_new_backdrops, save_new_collections, save_new_models, PriceUpdateBackdrop, PriceUpdateModel};
+use crate::update_floor::payload::{BybitResponse, PortalsResponse, PortalsResponseMap, XGiftItem, XGiftResponse, XGiftResponseMap};
 use ferogram::tl::enums::payments::{StarGiftUpgradeAttributes, StarGifts};
 use ferogram::tl::enums::{Document, StarGift, StarGiftAttribute};
 use ferogram::tl::functions;
 use ferogram::OverflowStrategy;
 use sqlx::PgPool;
+use std::collections::HashSet;
 use std::error::Error;
 use std::time::Duration;
-use std::{env, thread};
-use std::collections::HashSet;
-use std::sync::Arc;
-use serde::de::Unexpected::Option;
-use sqlx::__rt::sleep;
+use std::env;
 use wreq::{Client, Proxy};
 use wreq_util::Emulation;
 
+
+const DEFAULT_FLOOR_PRICE: i32 = 125;
+const MIN_FLOOR_PRICE: f32 = 125.0;
+const STAR_PRICE_PER_DOLLAR: f32 = 0.015;
+const HISTORICAL_PRICE_WEIGHT: f32 = 0.7;
+const NEW_API_PRICE_WEIGHT: f32 = 0.3;
+
+
 pub async fn run(pool: &PgPool) -> Result<(), Box<dyn Error>> {
+    sync_telegram_collections(pool).await?;
+    println!("Sync collections end");
+
+    update_floor_prices(pool).await?;
+    println!("Update end!");
+
+    Ok(())
+}
+
+async fn sync_telegram_collections(pool: &PgPool) -> Result<(), Box<dyn Error>> {
     let (viewer, _) = ferogram::Client::builder()
         .api_id(env::var("DEFAULT_API_ID").unwrap().parse().unwrap())
         .api_hash(env::var("DEFAULT_API_HASH").unwrap())
@@ -25,16 +40,11 @@ pub async fn run(pool: &PgPool) -> Result<(), Box<dyn Error>> {
         .update_overflow_strategy(OverflowStrategy::DropNewest)
         .connect().await?;
 
-    println!("1");
-
     let collections = viewer.invoke(&functions::payments::GetStarGifts {
         hash: 0,
     }).await?;
-    println!("2");
 
     let existing_ids = fetch_all_tg_ids(pool).await?;
-    // println!("{:?}", existing_ids);
-    println!("3");
 
     let mut new_collections_for_save = Vec::new();
     match collections {
@@ -43,10 +53,6 @@ pub async fn run(pool: &PgPool) -> Result<(), Box<dyn Error>> {
             for star_gift in star_gifts.gifts {
                 match star_gift {
                     StarGift::StarGift(star_gift) => {
-                        // if star_gift.title.is_some() &&
-                        //     (star_gift.upgrade_stars.is_some()
-                        //         || star_gift.auction
-                        //         || star_gift.availability_resale.is_some()) {
                         if star_gift.title.is_some() && star_gift.availability_resale.is_some() {
                             if !existing_ids.contains(&star_gift.id) {
                                 let title = star_gift.title.expect("REASON");
@@ -71,12 +77,11 @@ pub async fn run(pool: &PgPool) -> Result<(), Box<dyn Error>> {
             }
         }
     }
-    println!("4");
 
     save_new_collections(pool, new_collections_for_save).await?;
-    println!("5");
+
     let collections_without_models = fetch_collections_without_models(pool).await?;
-    println!("6");
+
     for collection in collections_without_models {
         println!("{:#?}", collection);
         let gift_attributes = viewer.invoke(
@@ -99,7 +104,7 @@ pub async fn run(pool: &PgPool) -> Result<(), Box<dyn Error>> {
                             let model = Model {
                                 name: gift_model.name,
                                 collection_id: collection.id,
-                                floor_price: 125,
+                                floor_price: DEFAULT_FLOOR_PRICE,
                                 sticker_id: doc.id,
                                 crafted: gift_model.crafted,
                             };
@@ -111,7 +116,7 @@ pub async fn run(pool: &PgPool) -> Result<(), Box<dyn Error>> {
                     let backdrop = Backdrop {
                         name: gift_backdrop.name,
                         collection_id: collection.id,
-                        floor_price: 125,
+                        floor_price: DEFAULT_FLOOR_PRICE,
                         tg_backdrop_id: gift_backdrop.backdrop_id,
                     };
                     backdrops_to_save.push(backdrop);
@@ -127,17 +132,19 @@ pub async fn run(pool: &PgPool) -> Result<(), Box<dyn Error>> {
 
         save_new_backdrops(pool, backdrops_to_save).await?;
 
-        thread::sleep(Duration::from_secs(3));
+        tokio::time::sleep(Duration::from_secs(3)).await;
     }
-    println!("6");
 
+    Ok(())
+}
+
+async fn update_floor_prices(pool: &PgPool) -> Result<(), Box<dyn Error>> {
     let client = Client::builder()
         .emulation(Emulation::Chrome144)
-        .proxy(Proxy::all(env::var("PROXY").unwrap())?)
+        // .proxy(Proxy::all(env::var("PROXY").unwrap())?)
         .cookie_store(true)
         .timeout(Duration::from_secs(10))
         .build()?;
-    println!("7");
 
     let collections = fetch_all_collections(pool).await?;
 
@@ -145,19 +152,17 @@ pub async fn run(pool: &PgPool) -> Result<(), Box<dyn Error>> {
         .map(|c| c.short_title.as_str())
         .collect::<Vec<&str>>()
         .join(",");
-    println!("8");
     let portal_response = get_portals_collections(&client, short_titles).await?;
-    println!("9");
-    let ton_price = get_ton_price(&client).await?;
-    println!("10");
-    let stars_rate = ton_price / 0.015; // just multiplay on floor_in_ton (0.015 - price per star)
+
+    let ton_price_in_dollars = get_ton_price(&client).await?;
+    let stars_rate = ton_price_in_dollars / STAR_PRICE_PER_DOLLAR; // just multiplay on floor_in_ton (0.015 - price per star)
 
     let models = get_all_models_item(&pool).await?;
     let backdrops = get_all_backdrops_item(&pool).await?;
 
     let mut models_to_update = Vec::new();
     let mut backdrops_to_update = Vec::new();
-    println!("11");
+
     for collection in collections {
         println!("{}", collection.title);
         let collection_portals
@@ -170,57 +175,30 @@ pub async fn run(pool: &PgPool) -> Result<(), Box<dyn Error>> {
             continue;
         }
 
-        let mut unique_models = HashSet::with_capacity(64);
-        let mut unique_backdrops = HashSet::with_capacity(80);
+        let unique_models = models.keys()
+            .filter_map(|(col, name)| {
+                (col == &collection.short_title).then_some(name)
+            })
+            .collect::<HashSet<_>>();
 
-        if let Some(portals) = collection_portals {
-            for name in portals.models.keys() {
-                unique_models.insert(name.clone());
-            }
-            for name in portals.backdrops.keys() {
-                unique_backdrops.insert(name.clone());
-            }
-        }
-        if let Some(xgift) = &x_gift_data {
-            for name in xgift.models.keys() {
-                unique_models.insert(name.clone());
-            }
-            for name in xgift.backdrops.keys() {
-                unique_backdrops.insert(name.clone());
-            }
-        }
+        let unique_backdrops = backdrops.keys()
+            .filter_map(|(col, name)| {
+                (col == &collection.short_title).then_some(name)
+            })
+            .collect::<HashSet<_>>();
 
         for model_name in unique_models {
             let p_floor = collection_portals.and_then(|p| {
-                p.models.get(&model_name).copied()
+                p.models.get(&*model_name).copied()
             });
             let x_floor = x_gift_data.as_ref().and_then(|x| {
-                x.models.get(&model_name).map(|m| {
-                    if m.deals30d_count < 30 { return m.floor_price_ton.min(m.avg30d_price) }
-                    // (m.avg30d_price + m.floor_price_ton) / 2.0
-                    m.floor_price_ton.min(m.avg30d_price).min(m.avg60d_price).min(m.avg90d_price)
-                })
+                x.models.get(&*model_name).map(|m| calculate_x_floor(m))
             });
 
-            let api_floor = match (p_floor, x_floor) {
-                (Some(p), Some(x)) => Some(p.min(x)),
-                (Some(p), None) => Some(p),
-                (None, Some(x)) => Some(x),
-                (None, None) => None
-            };
-
-            if let Some(mut api_floor) = api_floor {
-                let search_key = (collection.short_title.clone(), model_name.clone());
-
-                if let Some(model_db) = models.get(&search_key) {
-                    api_floor = api_floor * stars_rate;
-                    let final_floor = if model_db.floor_price == 125 {
-                        api_floor
-                    } else {
-                        (model_db.floor_price as f32) * 0.7 + api_floor * 0.3
-                    };
-
-                    let final_floor = final_floor.max(125.0).round() as i32;
+            let search_key = (collection.short_title.clone(), model_name.clone());
+            if let Some(model_db) = models.get(&search_key) {
+                if let Some(final_floor)
+                    = calculate_final_floor(p_floor, x_floor, model_db.floor_price, stars_rate) {
                     if final_floor != model_db.floor_price {
                         models_to_update.push(PriceUpdateModel {
                             id: model_db.id,
@@ -233,35 +211,16 @@ pub async fn run(pool: &PgPool) -> Result<(), Box<dyn Error>> {
 
         for backdrop_name in unique_backdrops {
             let p_floor = collection_portals.and_then(|p| {
-                p.backdrops.get(&backdrop_name).copied()
+                p.backdrops.get(&*backdrop_name).copied()
             });
             let x_floor = x_gift_data.as_ref().and_then(|x| {
-                x.backdrops.get(&backdrop_name).map(|b| {
-                    if b.deals30d_count < 40 { return b.floor_price_ton.min(b.avg30d_price) }
-                    // (b.avg30d_price + b.floor_price_ton) / 2.0
-                    b.floor_price_ton.min(b.avg30d_price).min(b.avg60d_price).min(b.avg90d_price)
-                })
+                x.backdrops.get(&*backdrop_name).map(|m| calculate_x_floor(m))
             });
 
-            let api_floor = match (p_floor, x_floor) {
-                (Some(p), Some(x)) => Some(p.min(x)),
-                (Some(p), None) => Some(p),
-                (None, Some(x)) => Some(x),
-                (None, None) => None
-            };
-
-            if let Some(mut api_floor) = api_floor {
-                let search_key = (collection.short_title.clone(), backdrop_name.clone());
-
-                if let Some(backdrop_db) = backdrops.get(&search_key) {
-                    api_floor = api_floor * stars_rate;
-                    let final_floor = if backdrop_db.floor_price == 125 {
-                        api_floor
-                    } else {
-                        (backdrop_db.floor_price as f32) * 0.7 + api_floor * 0.3
-                    };
-
-                    let final_floor = final_floor.max(125.0).round() as i32;
+            let search_key = (collection.short_title.clone(), backdrop_name.clone());
+            if let Some(backdrop_db) = backdrops.get(&search_key) {
+                if let Some(final_floor)
+                    = calculate_final_floor(p_floor, x_floor, backdrop_db.floor_price, stars_rate) {
                     if final_floor != backdrop_db.floor_price {
                         backdrops_to_update.push(PriceUpdateBackdrop {
                             id: backdrop_db.id,
@@ -276,9 +235,41 @@ pub async fn run(pool: &PgPool) -> Result<(), Box<dyn Error>> {
     bulk_update_models(&pool, models_to_update).await?;
     bulk_update_backdrops(&pool, backdrops_to_update).await?;
 
-    println!("Update end!");
-
     Ok(())
+}
+
+fn calculate_x_floor(item: &XGiftItem) -> f32 {
+    let mut min_price = item.floor_price_ton.min(item.avg30d_price);
+
+    if item.deals30d_count < 30 {
+        min_price = min_price.min(item.avg60d_price);
+    }
+
+    min_price
+}
+
+fn calculate_final_floor(
+    p_floor: Option<f32>,
+    x_floor: Option<f32>,
+    db_floor: i32,
+    stars_rate: f32
+) -> Option<i32> {
+    let api_floor = match (p_floor, x_floor) {
+        (Some(p), Some(x)) => p.min(x),
+        (Some(p), None) => p,
+        (None, Some(x)) => x,
+        (None, None) => return None
+    };
+
+    let api_floor_stars = api_floor * stars_rate;
+
+    let final_floor = if db_floor == DEFAULT_FLOOR_PRICE {
+        api_floor_stars
+    } else {
+        (db_floor as f32) * HISTORICAL_PRICE_WEIGHT + api_floor_stars * NEW_API_PRICE_WEIGHT
+    };
+
+    Some(final_floor.max(MIN_FLOOR_PRICE).round() as i32)
 }
 
 async fn get_portals_collections(client: &Client, short_titles: String)
@@ -287,13 +278,12 @@ async fn get_portals_collections(client: &Client, short_titles: String)
         = "https://portal-market.com/api/collections/filters?short_names=".to_string();
     portals_url.push_str(&*short_titles);
     for _ in 0..5 {
-        println!("okk");
-        if let Ok(response) = client.get(&portals_url).send().await {
+        if let Ok(response) = client.get(&portals_url).timeout(Duration::from_secs(30)).send().await {
             if let Ok(portals_response) = response.json::<PortalsResponse>().await {
                 return Ok(portals_response.into_map());
             }
         }
-        sleep(Duration::from_secs(2)).await;
+        tokio::time::sleep(Duration::from_secs(2)).await;
     }
     Err("Can't get response from portals".into())
 
@@ -319,13 +309,6 @@ async fn get_x_gift_collection(client: &Client, short_title: &String)
                 println!("Error for {short_title}, {}", err)
             }
         }
-        // if let Ok(response) = client.get(&x_gift_url)
-        //     .timeout(Duration::from_secs(10)).send().await {
-        //     if let Ok(x_gift_response) = response.json::<XGiftResponse>().await {
-        //         let x_gift_response_map = x_gift_response.into_map();
-        //         return Ok(x_gift_response_map)
-        //     }
-        // }
     }
 
     Err(format!("Can't get response from xGift for {short_title}").into())

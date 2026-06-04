@@ -1,4 +1,4 @@
-use std::collections::HashMap;
+use std::collections::{HashMap, HashSet};
 use sqlx::{PgPool, QueryBuilder};
 use crate::models::{Backdrop, Collection, Model};
 
@@ -49,11 +49,11 @@ pub async fn fetch_collections_without_models(pool: &PgPool)
     Ok(collections)
 }
 
-pub async fn fetch_all_tg_ids(pool: &PgPool) -> Result<Vec<i64>, sqlx::Error> {
+pub async fn fetch_all_tg_ids(pool: &PgPool) -> Result<HashSet<i64>, sqlx::Error> {
     let collection_tg_ids = sqlx::query_scalar!(
         "SELECT tg_id FROM collections"
     ).fetch_all(pool).await?;
-    Ok(collection_tg_ids)
+    Ok(collection_tg_ids.into_iter().collect::<HashSet<_>>())
 }
 
 pub async fn fetch_all_short_titles(pool: &PgPool) -> Result<Vec<String>, sqlx::Error> {

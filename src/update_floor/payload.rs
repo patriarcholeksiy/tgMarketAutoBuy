@@ -1,6 +1,5 @@
-use std::collections::HashMap;
-use std::num::ParseFloatError;
 use serde::{Deserialize, Deserializer};
+use std::collections::HashMap;
 
 fn parse_string_to_f32<'de, D>(deserializer: D) -> Result<f32, D::Error>
 where D: Deserializer<'de> {
@@ -10,8 +9,9 @@ where D: Deserializer<'de> {
 
 #[derive(Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
-pub struct XGiftModel {
-    pub model: String,
+pub struct XGiftItem {
+    #[serde(alias = "model", alias = "backdrop")]
+    pub name: String,
     #[serde(deserialize_with = "parse_string_to_f32")]
     pub floor_price_ton: f32,
     #[serde(deserialize_with = "parse_string_to_f32")]
@@ -25,33 +25,33 @@ pub struct XGiftModel {
     pub deals90d_count: u16
 }
 
-#[derive(Deserialize, Debug)]
-#[serde(rename_all = "camelCase")]
-pub struct XGiftBackdrop {
-    pub backdrop: String,
-    #[serde(deserialize_with = "parse_string_to_f32")]
-    pub floor_price_ton: f32,
-    #[serde(deserialize_with = "parse_string_to_f32")]
-    pub avg30d_price: f32,
-    #[serde(deserialize_with = "parse_string_to_f32")]
-    pub avg60d_price: f32,
-    #[serde(deserialize_with = "parse_string_to_f32")]
-    pub avg90d_price: f32,
-    pub deals30d_count: u16,
-    pub deals60d_count: u16,
-    pub deals90d_count: u16
-}
+// #[derive(Deserialize, Debug)]
+// #[serde(rename_all = "camelCase")]
+// pub struct XGiftBackdrop {
+//     pub backdrop: String,
+//     #[serde(deserialize_with = "parse_string_to_f32")]
+//     pub floor_price_ton: f32,
+//     #[serde(deserialize_with = "parse_string_to_f32")]
+//     pub avg30d_price: f32,
+//     #[serde(deserialize_with = "parse_string_to_f32")]
+//     pub avg60d_price: f32,
+//     #[serde(deserialize_with = "parse_string_to_f32")]
+//     pub avg90d_price: f32,
+//     pub deals30d_count: u16,
+//     pub deals60d_count: u16,
+//     pub deals90d_count: u16
+// }
 
 #[derive(Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct XGiftResponse {
-    pub gift_model: Vec<XGiftModel>,
-    pub gift_backdrop: Vec<XGiftBackdrop>
+    pub gift_model: Vec<XGiftItem>,
+    pub gift_backdrop: Vec<XGiftItem>
 }
 
 pub struct XGiftResponseMap {
-    pub models: HashMap<String, XGiftModel>,
-    pub backdrops: HashMap<String, XGiftBackdrop>
+    pub models: HashMap<String, XGiftItem>,
+    pub backdrops: HashMap<String, XGiftItem>
 }
 
 impl XGiftResponse {
@@ -59,32 +59,32 @@ impl XGiftResponse {
         XGiftResponseMap {
             models: self.gift_model
                 .into_iter()
-                .map(|m| (m.model.clone(), m))
+                .map(|m| (m.name.clone(), m))
                 .collect(),
             backdrops: self.gift_backdrop
                 .into_iter()
-                .map(|b| (b.backdrop.clone(), b))
+                .map(|b| (b.name.clone(), b))
                 .collect(),
         }
     }
 }
 
 #[derive(Deserialize, Debug)]
-pub struct ModelPortals {
+pub struct PortalsItem {
     pub name: String,
     pub floor_price: Option<String>
 }
 
-#[derive(Deserialize, Debug)]
-pub struct BackdropPortals {
-    pub name: String,
-    pub floor_price: Option<String>
-}
+// #[derive(Deserialize, Debug)]
+// pub struct BackdropPortals {
+//     pub name: String,
+//     pub floor_price: Option<String>
+// }
 
 #[derive(Deserialize, Debug)]
 pub struct CollectionPortals {
-    pub models: Vec<ModelPortals>,
-    pub backdrops: Vec<BackdropPortals>
+    pub models: Vec<PortalsItem>,
+    pub backdrops: Vec<PortalsItem>
 }
 
 #[derive(Deserialize, Debug)]
