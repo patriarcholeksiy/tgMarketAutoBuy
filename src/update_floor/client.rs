@@ -23,10 +23,10 @@ const NEW_API_PRICE_WEIGHT: f32 = 0.3;
 
 pub async fn run(pool: &PgPool) -> Result<(), Box<dyn Error>> {
     sync_telegram_collections(pool).await?;
-    println!("Sync collections end");
+    tracing::info!("Sync collections end");
 
     update_floor_prices(pool).await?;
-    println!("Update end!");
+    tracing::info!("Update end!");
 
     Ok(())
 }
@@ -39,6 +39,7 @@ async fn sync_telegram_collections(pool: &PgPool) -> Result<(), Box<dyn Error>> 
         .session_string(env::var("DEFAULT_SESSION_STRING").unwrap())
         .update_overflow_strategy(OverflowStrategy::DropNewest)
         .connect().await?;
+    tracing::info!("The Telegram client is authorized");
 
     let collections = viewer.invoke(&functions::payments::GetStarGifts {
         hash: 0,
@@ -83,7 +84,7 @@ async fn sync_telegram_collections(pool: &PgPool) -> Result<(), Box<dyn Error>> 
     let collections_without_models = fetch_collections_without_models(pool).await?;
 
     for collection in collections_without_models {
-        println!("{:#?}", collection);
+        tracing::info!("Get attributes for {}", collection.title);
         let gift_attributes = viewer.invoke(
             &functions::payments::GetStarGiftUpgradeAttributes {gift_id: collection.tg_id}
         ).await?;
@@ -98,7 +99,7 @@ async fn sync_telegram_collections(pool: &PgPool) -> Result<(), Box<dyn Error>> 
                 StarGiftAttribute::Model(gift_model) => {
                     match gift_model.document {
                         Document::Empty(_) => {
-                            eprintln!("Can't get document for gift_model {}", gift_model.name)
+                            tracing::warn!("Can't get document for gift_model {}", gift_model.name)
                         }
                         Document::Document(doc) => {
                             let model = Model {
@@ -164,14 +165,14 @@ async fn update_floor_prices(pool: &PgPool) -> Result<(), Box<dyn Error>> {
     let mut backdrops_to_update = Vec::new();
 
     for collection in collections {
-        println!("{}", collection.title);
+        tracing::info!("Update floor for {} collection", collection.title);
         let collection_portals
             = portal_response.collections.get(&collection.short_title);
         let x_gift_data
             = get_x_gift_collection(&client, &collection.short_title).await.ok();
 
         if collection_portals.is_none() && x_gift_data.is_none() {
-            println!("There is no data in either Portals or xGift for {}", collection.short_title);
+            tracing::error!("There is no data in either Portals or xGift for {}", collection.short_title);
             continue;
         }
 
@@ -285,8 +286,8 @@ async fn get_portals_collections(client: &Client, short_titles: String)
         }
         tokio::time::sleep(Duration::from_secs(2)).await;
     }
+    tracing::error!("Can't get response from portals");
     Err("Can't get response from portals".into())
-
 }
 
 async fn get_x_gift_collection(client: &Client, short_title: &String)
@@ -306,11 +307,11 @@ async fn get_x_gift_collection(client: &Client, short_title: &String)
                 }
             }
             Err(err) => {
-                println!("Error for {short_title}, {}", err)
+                tracing::warn!("Error for {short_title}, {}", err)
             }
         }
     }
-
+    tracing::warn!("Can't get response from xGift for {short_title}");
     Err(format!("Can't get response from xGift for {short_title}").into())
 }
 

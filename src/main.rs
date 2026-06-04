@@ -28,8 +28,7 @@ async fn main() -> Result<(), sqlx::Error>{
     migrate!("./migrations").run(&pool).await?;
 
     run(&pool).await.unwrap();
-
-    println!("okkkk");
+    
     Ok(())
 }
 

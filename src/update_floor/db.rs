@@ -192,7 +192,7 @@ pub async fn get_all_backdrops_item(pool: &PgPool)
 pub async fn bulk_update_models(pool: &PgPool, updates: Vec<PriceUpdateModel>)
     -> Result<(), sqlx::Error> {
     if updates.is_empty() {
-        println!("Updates for models is empty!");
+        tracing::error!("Updates for models is empty!");
         return Ok(())
     }
 
@@ -220,7 +220,7 @@ pub async fn bulk_update_models(pool: &PgPool, updates: Vec<PriceUpdateModel>)
 pub async fn bulk_update_backdrops(pool: &PgPool, updates: Vec<PriceUpdateBackdrop>)
                                 -> Result<(), sqlx::Error> {
     if updates.is_empty() {
-        println!("Updates for backdrops is empty!");
+        tracing::error!("Updates for backdrops is empty!");
         return Ok(())
     }
 

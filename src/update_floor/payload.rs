@@ -25,23 +25,6 @@ pub struct XGiftItem {
     pub deals90d_count: u16
 }
 
-// #[derive(Deserialize, Debug)]
-// #[serde(rename_all = "camelCase")]
-// pub struct XGiftBackdrop {
-//     pub backdrop: String,
-//     #[serde(deserialize_with = "parse_string_to_f32")]
-//     pub floor_price_ton: f32,
-//     #[serde(deserialize_with = "parse_string_to_f32")]
-//     pub avg30d_price: f32,
-//     #[serde(deserialize_with = "parse_string_to_f32")]
-//     pub avg60d_price: f32,
-//     #[serde(deserialize_with = "parse_string_to_f32")]
-//     pub avg90d_price: f32,
-//     pub deals30d_count: u16,
-//     pub deals60d_count: u16,
-//     pub deals90d_count: u16
-// }
-
 #[derive(Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct XGiftResponse {
@@ -75,11 +58,22 @@ pub struct PortalsItem {
     pub floor_price: Option<String>
 }
 
-// #[derive(Deserialize, Debug)]
-// pub struct BackdropPortals {
-//     pub name: String,
-//     pub floor_price: Option<String>
-// }
+impl PortalsItem {
+    fn extract_price(self) -> Option<(String, f32)> {
+        if let Some(floor) = self.floor_price {
+            match floor.parse::<f32>() {
+                Ok(floor) => Some((self.name, floor)),
+                Err(_) => {
+                    tracing::warn!("Bad floor for {}, {}", self.name, floor);
+                    None
+                }
+            }
+        } else {
+            tracing::warn!("item doesn't have '{}' no price (None)", self.name);
+            None
+        }
+    }
+}
 
 #[derive(Deserialize, Debug)]
 pub struct CollectionPortals {
@@ -111,37 +105,11 @@ impl PortalsResponse {
             let map_col = CollectionPortalsMap {
                 models: raw_col.models
                     .into_iter()
-                    .filter_map(|m| {
-                        if let Some(floor) = m.floor_price {
-                            match floor.parse::<f32>() {
-                                Ok(floor) => Some((m.name, floor)),
-                                Err(_) => {
-                                    println!("Bad floor for {}, {}, {}", m.name, col_name, floor);
-                                    None
-                                }
-                            }
-                        } else {
-                            println!("model doesn't have '{}' (collection: {}) no price (None)", m.name, col_name);
-                            None
-                        }
-                    })
+                    .filter_map(PortalsItem::extract_price)
                     .collect(),
                 backdrops: raw_col.backdrops
                     .into_iter()
-                    .filter_map(|b| {
-                        if let Some(floor) = b.floor_price {
-                            match floor.parse::<f32>() {
-                                Ok(floor) => Some((b.name, floor)),
-                                Err(_) => {
-                                    println!("Bad floor for {}, {}, {}", b.name, col_name, floor);
-                                    None
-                                }
-                            }
-                        } else {
-                            println!("backdrop doesn't have '{}' (collection: {}) no price (None)", b.name, col_name);
-                            None
-                        }
-                    })
+                    .filter_map(PortalsItem::extract_price)
                     .collect(),
             };
             map_collections.insert(col_name, map_col);
