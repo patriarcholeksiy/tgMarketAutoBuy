@@ -1,5 +1,4 @@
-pub mod update_floor;
-pub mod models;
+pub mod floors;
 
 use dotenvy::dotenv;
 use std::env;
@@ -10,7 +9,7 @@ use tracing_appender::rolling::{Builder, Rotation};
 use tracing_subscriber::{fmt, EnvFilter};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
-use crate::update_floor::client::run;
+use crate::floors::client::run;
 
 #[tokio::main]
 async fn main() -> Result<(), sqlx::Error>{

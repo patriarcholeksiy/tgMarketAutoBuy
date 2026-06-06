@@ -1,6 +1,6 @@
 use std::collections::{HashMap, HashSet};
 use sqlx::{PgPool, QueryBuilder};
-use crate::models::{Backdrop, Collection, Model};
+use crate::floors::models::{Backdrop, Collection, Model};
 
 
 #[derive(Debug)]

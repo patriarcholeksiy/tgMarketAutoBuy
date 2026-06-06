@@ -1,6 +1,6 @@
-use crate::models::{Backdrop, Collection, Model};
-use crate::update_floor::db::{bulk_update_backdrops, bulk_update_models, fetch_all_collections, fetch_all_tg_ids, fetch_collections_without_models, get_all_backdrops_item, get_all_models_item, save_new_backdrops, save_new_collections, save_new_models, PriceUpdateBackdrop, PriceUpdateModel};
-use crate::update_floor::payload::{BybitResponse, PortalsResponse, PortalsResponseMap, XGiftItem, XGiftResponse, XGiftResponseMap};
+use crate::floors::models::{Backdrop, Collection, Model};
+use crate::floors::db::{bulk_update_backdrops, bulk_update_models, fetch_all_collections, fetch_all_tg_ids, fetch_collections_without_models, get_all_backdrops_item, get_all_models_item, save_new_backdrops, save_new_collections, save_new_models, PriceUpdateBackdrop, PriceUpdateModel};
+use crate::floors::payload::{BybitResponse, PortalsResponse, PortalsResponseMap, XGiftItem, XGiftResponse, XGiftResponseMap};
 use ferogram::tl::enums::payments::{StarGiftUpgradeAttributes, StarGifts};
 use ferogram::tl::enums::{Document, StarGift, StarGiftAttribute};
 use ferogram::tl::functions;
