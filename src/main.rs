@@ -1,4 +1,5 @@
 pub mod floors;
+pub mod accounts;
 
 use dotenvy::dotenv;
 use std::env;
@@ -9,7 +10,7 @@ use tracing_appender::rolling::{Builder, Rotation};
 use tracing_subscriber::{fmt, EnvFilter};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
-use crate::floors::client::run;
+use crate::accounts::pool::AccountPool;
 
 #[tokio::main]
 async fn main() -> Result<(), sqlx::Error>{
@@ -26,7 +27,15 @@ async fn main() -> Result<(), sqlx::Error>{
 
     migrate!("./migrations").run(&pool).await?;
 
-    run(&pool).await.unwrap();
+    // run(&pool).await.unwrap();
+
+    let acc_pool = AccountPool::init(&pool).await;
+
+    for i in 0..2 {
+        println!("{:?}", acc_pool.get_viewer_client(i).await.get_me().await.unwrap().first_name);
+    }
+
+    // println!("{:?}", acc_pool.get_viewer_client(0).await.get_me().await.unwrap().first_name);
     
     Ok(())
 }
