@@ -47,12 +47,12 @@ impl AccountPool {
     }
 
     #[inline(always)]
-    pub async fn get_buyers_client(&self, index: usize) -> &Client {
+    pub fn get_buyers_client(&self, index: usize) -> &Client {
         &self.buyers[index % self.buyers.len()]
     }
 
     #[inline(always)]
-    pub async fn get_viewer_client(&self, index: usize) -> &Client {
+    pub fn get_viewer_client(&self, index: usize) -> &Client {
         &self.viewers[index % self.viewers.len()]
     }
 }

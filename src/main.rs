@@ -3,6 +3,7 @@ pub mod accounts;
 
 use dotenvy::dotenv;
 use std::env;
+use std::time::Instant;
 use sqlx::migrate;
 use sqlx::postgres::PgPoolOptions;
 use tracing::level_filters::LevelFilter;
@@ -11,6 +12,7 @@ use tracing_subscriber::{fmt, EnvFilter};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use crate::accounts::pool::AccountPool;
+use crate::floors::cache::Cache;
 
 #[tokio::main]
 async fn main() -> Result<(), sqlx::Error>{
@@ -29,11 +31,13 @@ async fn main() -> Result<(), sqlx::Error>{
 
     // run(&pool).await.unwrap();
 
-    let acc_pool = AccountPool::init(&pool).await;
+    let cache = Cache::init(&pool).await?;
 
-    for i in 0..2 {
-        println!("{:?}", acc_pool.get_viewer_client(i).await.get_me().await.unwrap().first_name);
-    }
+    let acc_pool = AccountPool::init(&pool).await;
+    //
+    // for i in 0..2 {
+    //     println!("{:?}", acc_pool.get_viewer_client(i).await.get_me().await.unwrap().first_name);
+    // }
 
     // println!("{:?}", acc_pool.get_viewer_client(0).await.get_me().await.unwrap().first_name);
     

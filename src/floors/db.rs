@@ -1,4 +1,5 @@
 use std::collections::{HashMap, HashSet};
+use rustc_hash::{FxHashMap};
 use sqlx::{PgPool, QueryBuilder};
 use crate::floors::models::{Backdrop, Collection, Model};
 
@@ -243,5 +244,28 @@ pub async fn bulk_update_backdrops(pool: &PgPool, updates: Vec<PriceUpdateBackdr
     ).execute(pool).await?;
 
     Ok(())
+}
+
+pub async fn get_all_floor_active_collections(pool: &PgPool)
+                                              -> Result<FxHashMap<(i64, u16), i32>, sqlx::Error> {
+    let records = sqlx::query!(
+        r#"
+        SELECT
+            m.sticker_id,
+            b.tg_backdrop_id,
+            GREATEST(m.floor_price, b.floor_price) AS max_floor_price
+        FROM models AS m
+        JOIN backdrops AS b ON m.collection_id = b.collection_id
+        JOIN collections AS c ON c.id = m.collection_id
+        WHERE c.active = true;
+        "#
+    ).fetch_all(pool).await?;
+
+    let map: FxHashMap<(i64, u16), i32> = records.into_iter()
+        .map(|r|
+            ((r.sticker_id, r.tg_backdrop_id as u16), r.max_floor_price.unwrap_or_else(|| 125))
+        ).collect();
+
+    Ok(map)
 }
 
