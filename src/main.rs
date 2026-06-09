@@ -1,5 +1,6 @@
 pub mod floors;
 pub mod accounts;
+pub mod sniper;
 
 use dotenvy::dotenv;
 use std::env;
