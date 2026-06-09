@@ -1,13 +1,23 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
-use ferogram::tl::enums::{Document, InputInvoice, InputPeer, StarGift, StarGiftAttribute, StarsAmount};
+use ferogram::Client;
+use ferogram::tl::enums::{Document, InputPeer, StarGift, StarGiftAttribute, StarsAmount};
 use ferogram::tl::enums::payments::{ResaleStarGifts};
 use ferogram::tl::functions;
 use ferogram::tl::types::{InputInvoiceStarGiftResale};
 use futures::future::join_all;
 use crate::accounts::pool::AccountPool;
+use crate::accounts::telegram::ParsedGift;
 use crate::floors::cache::Cache;
+use crate::sniper::strategy::SniperStrategy;
+
+pub struct Context {
+    pub buyers: Arc<[(Client, InputPeer)]>,
+    pub cache: Arc<Cache>,
+    pub target_gifts: Arc<Vec<i64>>,
+    pub counter: Arc<AtomicUsize>,
+}
 
 pub async fn start_runner(pool: AccountPool, cache: Arc<Cache>, target_gifts: Arc<Vec<i64>>) {
     let counter = Arc::new(AtomicUsize::new(0));
@@ -25,10 +35,12 @@ pub async fn start_runner(pool: AccountPool, cache: Arc<Cache>, target_gifts: Ar
     }
 
     for (i, viewer) in pool.viewers.into_iter().enumerate() {
-        let buyers_clone = Arc::clone(&pool.buyers);
-        let counter_clone = Arc::clone(&counter);
-        let cache_clone = Arc::clone(&cache);
-        let target_gifts = Arc::clone(&target_gifts);
+        let context = Context {
+            buyers: Arc::clone(&pool.buyers),
+            cache: Arc::clone(&cache),
+            target_gifts: Arc::clone(&target_gifts),
+            counter: Arc::clone(&counter),
+        };
 
         tokio::time::sleep(Duration::from_millis((1600 / len_v * i) as u64)).await;
 
@@ -37,11 +49,11 @@ pub async fn start_runner(pool: AccountPool, cache: Arc<Cache>, target_gifts: Ar
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
             loop {
-                let index = counter_clone.fetch_add(1, Ordering::Relaxed);
+                let index = context.counter.fetch_add(1, Ordering::Relaxed);
 
                 interval.tick().await;
 
-                let current_target = target_gifts[index % target_gifts_len];
+                let current_target = context.target_gifts[index % target_gifts_len];
 
                 let invoke_result
                     = viewer.invoke(&functions::payments::GetResaleStarGifts {
@@ -79,75 +91,45 @@ pub async fn start_runner(pool: AccountPool, cache: Arc<Cache>, target_gifts: Ar
                     }
                 };
 
-                if let StarGift::Unique(unique) = first_gift {
-                    let mut sticker_id = None;
-                    let mut backdrop_id = None;
-                    for attribute in &unique.attributes {
-                        match attribute {
-                            StarGiftAttribute::Model(model) => {
-                                if let Document::Document(doc) = &model.document {
-                                    sticker_id = Some(doc.id);
-                                }
+                let parsed = match ParsedGift::try_from_tg(first_gift) {
+                    Some(p) => p,
+                    None => continue,
+                };
+
+                let floor_price = {
+                    let map = context.cache.floor_prices.load();
+                    *map.get(&(parsed.sticker_id, parsed.backdrop_id as u16)).unwrap_or(&250)
+                };
+
+                if SniperStrategy::should_buy(floor_price, parsed.price_in_stars) {
+                    tracing::info!("Find gift {} with price {}", parsed.slug, parsed.price_in_stars);
+
+                    let mut handlers = vec![];
+
+                    for (buyer, input_peer) in context.buyers.iter() {
+                        let buyer_clone = buyer.clone();
+                        let input_peer_clone = input_peer.clone();
+                        let slug = parsed.slug.clone();
+
+                        handlers.push(tokio::spawn(async move {
+                            let buy_result = buyer_clone.invoke(&functions::payments::SendStarsForm {
+                                form_id: 0,
+                                invoice: InputInvoiceStarGiftResale {
+                                    ton: true,
+                                    slug,
+                                    to_id: input_peer_clone,
+                                }.into()
+                            }).await;
+
+                            match buy_result {
+                                Ok(ok) =>
+                                    tracing::info!("The gift was successfully purchased"),
+                                Err(err) =>
+                                    tracing::warn!("The gift was not bought, err - {err}")
                             }
-                            StarGiftAttribute::Backdrop(backdrop) => {
-                                backdrop_id = Some(backdrop.backdrop_id);
-                            }
-                            _ => {}
-                        }
+                        }));
                     }
-
-                    if let (Some(sticker_id), Some(backdrop_id)) = (sticker_id, backdrop_id) {
-                        let floor_price = {
-                            let map_guard = cache_clone.floor_prices.load();
-                            match map_guard.get(&(sticker_id, backdrop_id as u16)) {
-                                None => 250,
-                                Some(&price) => price
-                            }
-                        };
-
-                        let mut price_in_stars = None;
-                        if let Some(amounts) = unique.resell_amount.as_ref() {
-                            for amount in amounts {
-                                if let StarsAmount::StarsAmount(a) = amount {
-                                    price_in_stars = Some(a.amount);
-                                    break;
-                                }
-                            }
-                        }
-
-                        if let Some(price_in_stars) = price_in_stars {
-                            if floor_price as i64 >= price_in_stars * 2 {
-                                tracing::info!("Find gift {} with price {}", unique.slug, price_in_stars);
-
-                                let mut handlers = vec![];
-
-                                for (buyer, input_peer) in buyers_clone.iter() {
-                                    let buyer_clone = buyer.clone();
-                                    let input_peer_clone = input_peer.clone();
-                                    let slug = unique.slug.clone();
-
-                                    handlers.push(tokio::spawn(async move {
-                                        let buy_result = buyer_clone.invoke(&functions::payments::SendStarsForm {
-                                            form_id: 0,
-                                            invoice: InputInvoiceStarGiftResale {
-                                                ton: true,
-                                                slug,
-                                                to_id: input_peer_clone,
-                                            }.into()
-                                        }).await;
-
-                                        match buy_result {
-                                            Ok(ok) =>
-                                                tracing::info!("The gift was successfully purchased"),
-                                            Err(err) =>
-                                                tracing::warn!("The gift was not bought, err - {err}")
-                                        }
-                                    }));
-                                }
-                                join_all(handlers).await;
-                            }
-                        }
-                    }
+                    join_all(handlers).await;
                 }
             }
         });
