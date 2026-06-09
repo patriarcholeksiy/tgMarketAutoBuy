@@ -1,13 +1,16 @@
 use crate::accounts::db::{get_active_accounts, Account, AccountRole};
-use ferogram::{Client, OverflowStrategy};
+use ferogram::{tl, Client, OverflowStrategy};
 use sqlx::PgPool;
 use std::env;
 use std::sync::Arc;
 use std::time::Duration;
+use ferogram::tl::enums::contacts::ResolvedPeer;
+use ferogram::tl::enums::{InputPeer, User};
+use ferogram::tl::types::InputPeerUser;
 
 pub struct AccountPool {
-    buyers: Arc<Vec<Client>>,
-    viewers: Arc<Vec<Client>>
+    pub buyers: Arc<[(Client, InputPeer)]>,
+    pub viewers: Vec<Client>
 }
 
 
@@ -20,14 +23,17 @@ impl AccountPool {
         for account in accounts {
             let client = Self::connect_client(&account).await;
             match account.role {
-                AccountRole::Buyer => buyers.push(client),
+                AccountRole::Buyer => {
+                    let input_peer = Self::generate_input_peer(&client).await;
+                    buyers.push((client, input_peer))
+                },
                 AccountRole::Viewer => viewers.push(client)
             }
             tokio::time::sleep(Duration::from_millis(500)).await;
         }
         AccountPool {
-            buyers: Arc::new(buyers),
-            viewers: Arc::new(viewers)
+            buyers: Arc::from(buyers),
+            viewers
         }
     }
 
@@ -46,8 +52,21 @@ impl AccountPool {
         client
     }
 
+    async fn generate_input_peer(client: &Client) -> InputPeer {
+        let peer = client.invoke(&tl::functions::contacts::ResolveUsername {
+            username: "GiftsToPortals".to_string(),
+            referer: None,
+        }).await.unwrap();
+        let ResolvedPeer::ResolvedPeer(peer) = peer;
+        let User::User(user) = peer.users.get(0).unwrap() else { todo!() };
+        InputPeer::User(InputPeerUser {
+            user_id: 7804544881,
+            access_hash: user.access_hash.unwrap(),
+        })
+    }
+
     #[inline(always)]
-    pub fn get_buyers_client(&self, index: usize) -> &Client {
+    pub fn get_buyers_client(&self, index: usize) -> &(Client, InputPeer) {
         &self.buyers[index % self.buyers.len()]
     }
 

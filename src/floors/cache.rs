@@ -4,7 +4,7 @@ use sqlx::PgPool;
 use crate::floors::db::get_all_floor_active_collections;
 
 pub struct Cache {
-    floor_prices: ArcSwap<FxHashMap<(i64, u16), i32>>
+    pub floor_prices: ArcSwap<FxHashMap<(i64, u16), i32>>
 }
 
 impl Cache {
