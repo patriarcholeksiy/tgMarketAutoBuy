@@ -23,29 +23,43 @@ impl ParsedGift {
                     }
                 }
             }
-            
-            if let [a1, _, a3] = unique.attributes.as_slice() {
-                if let StarGiftAttribute::Model(model) = a1 {
-                    if let Document::Document(doc) = &model.document {
-                        sticker_id = Some(doc.id);
-                    }
-                }
-                if let StarGiftAttribute::Backdrop(backdrop) = a3 {
-                    backdrop_id = Some(backdrop.backdrop_id);
-                }
-            } else {
-                tracing::warn!("Linear patter [a1, _, a3] for fast parse doesn't work with - {}", unique.slug);
-                for attribute in &unique.attributes {
-                    match attribute {
-                        StarGiftAttribute::Model(model) => {
-                            if let Document::Document(doc) = &model.document {
-                                sticker_id = Some(doc.id);
-                            }
+
+            match unique.attributes.as_slice() {
+                [a1, _, a3] => {
+                    if let StarGiftAttribute::Model(model) = a1 {
+                        if let Document::Document(doc) = &model.document {
+                            sticker_id = Some(doc.id);
                         }
-                        StarGiftAttribute::Backdrop(backdrop) => {
-                            backdrop_id = Some(backdrop.backdrop_id)
-                        },
-                        _ => {}
+                    } else { tracing::warn!("Cannot get model for attr count 3") }
+                    if let StarGiftAttribute::Backdrop(backdrop) = a3 {
+                        backdrop_id = Some(backdrop.backdrop_id);
+                    } else { tracing::warn!("Cannot get backdrop for attr count 3") }
+                }
+                [a1, _, a3, _] => {
+                    if let StarGiftAttribute::Model(model) = a1 {
+                        if let Document::Document(doc) = &model.document {
+                            sticker_id = Some(doc.id);
+                        }
+                    } else { tracing::warn!("Cannot get model for attr count 4") }
+                    if let StarGiftAttribute::Backdrop(backdrop) = a3 {
+                        backdrop_id = Some(backdrop.backdrop_id);
+                    } else { tracing::warn!("Cannot get backdrop for attr count 4") }
+                }
+                _ => {
+                    tracing::warn!("Abnormal number of attributes (neither 3 nor 4) for the lot: {}",
+                    unique.slug);
+                    for attribute in &unique.attributes {
+                        match attribute {
+                            StarGiftAttribute::Model(model) => {
+                                if let Document::Document(doc) = &model.document {
+                                    sticker_id = Some(doc.id);
+                                }
+                            }
+                            StarGiftAttribute::Backdrop(backdrop) => {
+                                backdrop_id = Some(backdrop.backdrop_id)
+                            }
+                            _ => {}
+                        }
                     }
                 }
             }
