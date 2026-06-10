@@ -2,9 +2,10 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use ferogram::Client;
-use ferogram::tl::enums::{Document, InputPeer, StarGift, StarGiftAttribute, StarsAmount};
+use ferogram::tl::enums::{InputPeer, StarGift, StarGiftAttribute, StarsAmount};
 use ferogram::tl::enums::payments::{ResaleStarGifts};
 use ferogram::tl::functions;
+use ferogram::tl::functions::payments::GetResaleStarGifts;
 use ferogram::tl::types::{InputInvoiceStarGiftResale};
 use futures::future::join_all;
 use crate::accounts::pool::AccountPool;
@@ -15,13 +16,16 @@ use crate::sniper::strategy::SniperStrategy;
 pub struct Context {
     pub buyers: Arc<[(Client, InputPeer)]>,
     pub cache: Arc<Cache>,
-    pub target_gifts: Arc<Vec<i64>>,
+    pub requests: Arc<[Arc<[GetResaleStarGifts]>]>,
     pub counter: Arc<AtomicUsize>,
 }
 
-pub async fn start_runner(pool: AccountPool, cache: Arc<Cache>, target_gifts: Arc<Vec<i64>>) {
+pub async fn start_runner(pool: AccountPool,
+                          cache: Arc<Cache>,
+                          requests: Arc<[Arc<[GetResaleStarGifts]>]>) {
+
     let counter = Arc::new(AtomicUsize::new(0));
-    let target_gifts_len = target_gifts.len();
+    let requests_len = requests.len();
     let len_v = pool.viewers.len();
 
     if pool.viewers.len() == 0 {
@@ -38,7 +42,7 @@ pub async fn start_runner(pool: AccountPool, cache: Arc<Cache>, target_gifts: Ar
         let context = Context {
             buyers: Arc::clone(&pool.buyers),
             cache: Arc::clone(&cache),
-            target_gifts: Arc::clone(&target_gifts),
+            requests: Arc::clone(&requests),
             counter: Arc::clone(&counter),
         };
 
@@ -53,20 +57,11 @@ pub async fn start_runner(pool: AccountPool, cache: Arc<Cache>, target_gifts: Ar
 
                 interval.tick().await;
 
-                let current_target = context.target_gifts[index % target_gifts_len];
+                let gift_combos = &context.requests[index % requests_len];
+                let combo_index = (index / requests_len) % gift_combos.len();
 
                 let invoke_result
-                    = viewer.invoke(&functions::payments::GetResaleStarGifts {
-                    sort_by_price: false,
-                    sort_by_num: false,
-                    for_craft: false,
-                    stars_only: false,
-                    attributes_hash: None,
-                    gift_id: current_target,
-                    attributes: None,
-                    offset: "0".to_string(),
-                    limit: 1
-                }).await;
+                    = viewer.invoke(&gift_combos[combo_index]).await;
 
                 let resale_star_gifts = match invoke_result {
                     Ok(res) => res,
@@ -123,9 +118,9 @@ pub async fn start_runner(pool: AccountPool, cache: Arc<Cache>, target_gifts: Ar
 
                             match buy_result {
                                 Ok(ok) =>
-                                    tracing::info!("The gift was successfully purchased"),
+                                    tracing::info!("The gift was successfully purchased - {ok:?}"),
                                 Err(err) =>
-                                    tracing::warn!("The gift was not bought, err - {err}")
+                                    tracing::warn!("The gift was not bought, err - {err:?}")
                             }
                         }));
                     }

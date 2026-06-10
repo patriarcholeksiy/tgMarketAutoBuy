@@ -34,3 +34,24 @@ pub async fn get_active_accounts(pg_pool: &PgPool) -> Result<Vec<Account>, sqlx:
     ).fetch_all(pg_pool).await?;
     Ok(accounts)
 }
+
+pub struct CollectionStickers {
+    pub gift_id: i64,
+    pub sticker_ids: Vec<i64>
+}
+
+pub async fn get_active_collection_stickers(pg_pool: &PgPool)
+    -> Result<Vec<CollectionStickers>, sqlx::Error> {
+    let collection_stickers = sqlx::query_as!(
+        CollectionStickers,
+        r#"
+        SELECT c.tg_id AS gift_id, ARRAY_AGG(sticker_id) as "sticker_ids!"
+        FROM models as m
+        JOIN collections AS c ON m.collection_id = c.id
+        WHERE c.active = true
+        GROUP BY c.tg_id
+        "#
+    ).fetch_all(pg_pool).await?;
+
+    Ok(collection_stickers)
+}

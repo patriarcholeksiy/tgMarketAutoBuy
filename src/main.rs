@@ -2,18 +2,21 @@ pub mod floors;
 pub mod accounts;
 pub mod sniper;
 
+use crate::accounts::pool::AccountPool;
+use crate::accounts::requests::build_targets_with_combos;
+use crate::floors::cache::Cache;
+use crate::sniper::runner::start_runner;
 use dotenvy::dotenv;
-use std::env;
-use std::time::Instant;
 use sqlx::migrate;
 use sqlx::postgres::PgPoolOptions;
+use std::env;
+use std::sync::Arc;
+use std::time::Duration;
 use tracing::level_filters::LevelFilter;
 use tracing_appender::rolling::{Builder, Rotation};
-use tracing_subscriber::{fmt, EnvFilter};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
-use crate::accounts::pool::AccountPool;
-use crate::floors::cache::Cache;
+use tracing_subscriber::{fmt, EnvFilter};
 
 #[tokio::main]
 async fn main() -> Result<(), sqlx::Error>{
@@ -35,12 +38,18 @@ async fn main() -> Result<(), sqlx::Error>{
     let cache = Cache::init(&pool).await?;
 
     let acc_pool = AccountPool::init(&pool).await;
-    //
-    // for i in 0..2 {
-    //     println!("{:?}", acc_pool.get_viewer_client(i).await.get_me().await.unwrap().first_name);
-    // }
 
-    // println!("{:?}", acc_pool.get_viewer_client(0).await.get_me().await.unwrap().first_name);
+    let request = build_targets_with_combos(&pool).await?;
+
+    let sniper_handle = tokio::spawn(async move {
+        start_runner(acc_pool, Arc::new(cache), request).await;
+    });
+
+    tokio::signal::ctrl_c().await?;
+
+    sniper_handle.abort();
+
+    tokio::time::sleep(Duration::from_secs(2)).await;
     
     Ok(())
 }
