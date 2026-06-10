@@ -2,8 +2,9 @@ use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
 use ferogram::Client;
-use ferogram::tl::enums::{InputPeer, StarGift, StarGiftAttribute, StarsAmount};
-use ferogram::tl::enums::payments::{ResaleStarGifts};
+use ferogram::tl::enums::{InputPeer, LabeledPrice};
+use ferogram::tl::enums::Invoice::Invoice;
+use ferogram::tl::enums::payments::{PaymentForm, ResaleStarGifts};
 use ferogram::tl::functions;
 use ferogram::tl::functions::payments::GetResaleStarGifts;
 use ferogram::tl::types::{InputInvoiceStarGiftResale};
@@ -46,10 +47,10 @@ pub async fn start_runner(pool: AccountPool,
             counter: Arc::clone(&counter),
         };
 
-        tokio::time::sleep(Duration::from_millis((1600 / len_v * i) as u64)).await;
+        tokio::time::sleep(Duration::from_millis((1610 / len_v * i) as u64)).await;
 
         tokio::spawn(async move {
-            let mut interval = tokio::time::interval(Duration::from_millis(1600));
+            let mut interval = tokio::time::interval(Duration::from_millis(1610));
             interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
 
             loop {
@@ -101,19 +102,57 @@ pub async fn start_runner(pool: AccountPool,
 
                     let mut handlers = vec![];
 
+                    let price_in_ton = parsed.price_in_ton;
+
                     for (buyer, input_peer) in context.buyers.iter() {
                         let buyer_clone = buyer.clone();
                         let input_peer_clone = input_peer.clone();
                         let slug = parsed.slug.clone();
 
                         handlers.push(tokio::spawn(async move {
+                            let invoice = InputInvoiceStarGiftResale {
+                                ton: true,
+                                slug,
+                                to_id: input_peer_clone,
+                            };
+
+                            let payment_form = match buyer_clone.invoke(&functions::payments::GetPaymentForm {
+                                invoice: invoice.clone().into(),
+                                theme_params: None,
+                            }).await {
+                                Ok(form) => form,
+                                Err(err) => {
+                                    tracing::warn!("Client can't get payment form - {err:#?}");
+                                    return
+                                }
+                            };
+
+                            let PaymentForm::StarGift(form_star_gift) = payment_form else {
+                                tracing::warn!("The payment form is not StarGift");
+                                return
+                            };
+
+                            let Invoice(form_invoice) = form_star_gift.invoice;
+
+                            let Some(LabeledPrice::LabeledPrice(price)) = &form_invoice.prices.first() else {
+                                tracing::warn!("Labeled price is empty!");
+                                return
+                            };
+
+                            // 150_000_000 its 0.15 ton it is necessary if the price is sensitive
+                            if price_in_ton + 150_000_000 < price.amount {
+                                tracing::warn!(
+                                    "Price in payment_form is changed, {} < {}, with currency {}",
+                                    price_in_ton,
+                                    price.amount,
+                                    form_invoice.currency
+                                );
+                                return
+                            }
+
                             let buy_result = buyer_clone.invoke(&functions::payments::SendStarsForm {
-                                form_id: 0,
-                                invoice: InputInvoiceStarGiftResale {
-                                    ton: true,
-                                    slug,
-                                    to_id: input_peer_clone,
-                                }.into()
+                                form_id: form_star_gift.form_id,
+                                invoice: invoice.into()
                             }).await;
 
                             match buy_result {
