@@ -17,4 +17,3 @@ tracing-subscriber = { version = "0.3", features = ["env-filter", "registry"] }
 tracing-appender = "0.2"
 arc-swap = "1.9.1"
 rustc-hash = "2.1.2"
-futures = "0.3.32"

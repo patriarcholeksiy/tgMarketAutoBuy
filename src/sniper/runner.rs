@@ -1,14 +1,14 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
-use ferogram::Client;
+use ferogram::{Client};
 use ferogram::tl::enums::{InputPeer, LabeledPrice};
 use ferogram::tl::enums::Invoice::Invoice;
 use ferogram::tl::enums::payments::{PaymentForm, ResaleStarGifts};
 use ferogram::tl::functions;
 use ferogram::tl::functions::payments::GetResaleStarGifts;
 use ferogram::tl::types::{InputInvoiceStarGiftResale};
-use futures::future::join_all;
+use tokio::task::{JoinSet};
 use crate::accounts::pool::AccountPool;
 use crate::accounts::telegram::ParsedGift;
 use crate::floors::cache::Cache;
@@ -100,31 +100,67 @@ pub async fn start_runner(pool: AccountPool,
                 if SniperStrategy::should_buy(floor_price, parsed.price_in_stars) {
                     tracing::info!("Find gift {} with price {}", parsed.slug, parsed.price_in_stars);
 
-                    let mut handlers = vec![];
-
                     let price_in_ton = parsed.price_in_ton;
+
+                    let mut set = JoinSet::new();
 
                     for (buyer, input_peer) in context.buyers.iter() {
                         let buyer_clone = buyer.clone();
                         let input_peer_clone = input_peer.clone();
                         let slug = parsed.slug.clone();
 
-                        handlers.push(tokio::spawn(async move {
-                            let invoice = InputInvoiceStarGiftResale {
-                                ton: true,
-                                slug,
-                                to_id: input_peer_clone,
-                            };
+                        let invoice = InputInvoiceStarGiftResale {
+                            ton: true,
+                            slug,
+                            to_id: input_peer_clone,
+                        };
 
-                            let payment_form = match buyer_clone.invoke(&functions::payments::GetPaymentForm {
-                                invoice: invoice.clone().into(),
-                                theme_params: None,
-                            }).await {
-                                Ok(form) => form,
-                                Err(err) => {
-                                    tracing::warn!("Client can't get payment form - {err:#?}");
-                                    return
+                        let get_payment_form = Arc::new(functions::payments::GetPaymentForm {
+                            invoice: invoice.clone().into(),
+                            theme_params: None,
+                        });
+
+                        set.spawn(tokio::spawn(async move {
+
+                            let mut payment_set = JoinSet::new();
+
+                            for _ in 0..10 {
+                                let buyer_clone_form = buyer_clone.clone();
+                                let get_payment_form_clone = Arc::clone(&get_payment_form);
+                                payment_set.spawn(async move {
+                                    buyer_clone_form.invoke(get_payment_form_clone.as_ref()).await
+                                });
+                            }
+
+                            let mut fastest_payment_form = None;
+
+                            while let Some(join_result) = payment_set.join_next().await {
+                                match join_result {
+                                    Ok(invoke_result) => {
+                                        match invoke_result {
+                                            Ok(join_payment_form) => {
+                                                fastest_payment_form = Some(join_payment_form);
+                                                payment_set.abort_all();
+                                                break;
+                                            }
+                                            Err(err) => {
+                                                if let Some(sec) = err.flood_wait_seconds() {
+                                                    tracing::warn!("Buyer get flood wait - {sec} sec")
+                                                } else {
+                                                    tracing::warn!("Buyer get err - {err:?}")
+                                                }
+                                            }
+                                        }
+                                    }
+                                    Err(join_err) => {
+                                        tracing::warn!("The join_thread panicked or was canceled: {join_err:?}");
+                                    }
                                 }
+                            }
+
+                            let Some(payment_form) = fastest_payment_form else {
+                                tracing::warn!("Client can't get payment form");
+                                return
                             };
 
                             let PaymentForm::StarGift(form_star_gift) = payment_form else {
@@ -163,7 +199,7 @@ pub async fn start_runner(pool: AccountPool,
                             }
                         }));
                     }
-                    join_all(handlers).await;
+                    set.join_all().await;
                 }
             }
         });
