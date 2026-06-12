@@ -9,34 +9,26 @@ use sqlx::PgPool;
 use std::collections::HashSet;
 use std::error::Error;
 use std::time::Duration;
-use std::env;
 use wreq::{Client, Proxy};
 use wreq_util::Emulation;
+use crate::config::AppConfig;
 
-
-const DEFAULT_FLOOR_PRICE: i32 = 125;
-const MIN_FLOOR_PRICE: f32 = 125.0;
-const STAR_PRICE_PER_DOLLAR: f32 = 0.015;
-const HISTORICAL_PRICE_WEIGHT: f32 = 0.7;
-const NEW_API_PRICE_WEIGHT: f32 = 0.3;
-
-
-pub async fn run(pool: &PgPool) -> Result<(), Box<dyn Error>> {
-    sync_telegram_collections(pool).await?;
+pub async fn run(pool: &PgPool, config: &AppConfig) -> Result<(), Box<dyn Error>> {
+    sync_telegram_collections(pool, config).await?;
     tracing::info!("Sync collections end");
 
-    update_floor_prices(pool).await?;
+    update_floor_prices(pool, config).await?;
     tracing::info!("Update end!");
 
     Ok(())
 }
 
-async fn sync_telegram_collections(pool: &PgPool) -> Result<(), Box<dyn Error>> {
+async fn sync_telegram_collections(pool: &PgPool, config: &AppConfig) -> Result<(), Box<dyn Error>> {
     let (viewer, _) = ferogram::Client::builder()
-        .api_id(env::var("DEFAULT_API_ID").unwrap().parse().unwrap())
-        .api_hash(env::var("DEFAULT_API_HASH").unwrap())
+        .api_id(config.default_api_id)
+        .api_hash(&config.default_api_hash)
         .update_queue_capacity(0)
-        .session_string(env::var("DEFAULT_SESSION_STRING").unwrap())
+        .session_string(&config.default_session_string)
         .update_overflow_strategy(OverflowStrategy::DropNewest)
         .connect().await?;
     tracing::info!("The Telegram client is authorized");
@@ -105,7 +97,7 @@ async fn sync_telegram_collections(pool: &PgPool) -> Result<(), Box<dyn Error>> 
                             let model = Model {
                                 name: gift_model.name,
                                 collection_id: collection.id,
-                                floor_price: DEFAULT_FLOOR_PRICE,
+                                floor_price: config.floor_price_default,
                                 sticker_id: doc.id,
                                 crafted: gift_model.crafted,
                             };
@@ -117,7 +109,7 @@ async fn sync_telegram_collections(pool: &PgPool) -> Result<(), Box<dyn Error>> 
                     let backdrop = Backdrop {
                         name: gift_backdrop.name,
                         collection_id: collection.id,
-                        floor_price: DEFAULT_FLOOR_PRICE,
+                        floor_price: config.floor_price_default,
                         tg_backdrop_id: gift_backdrop.backdrop_id,
                     };
                     backdrops_to_save.push(backdrop);
@@ -139,7 +131,7 @@ async fn sync_telegram_collections(pool: &PgPool) -> Result<(), Box<dyn Error>> 
     Ok(())
 }
 
-async fn update_floor_prices(pool: &PgPool) -> Result<(), Box<dyn Error>> {
+async fn update_floor_prices(pool: &PgPool, config: &AppConfig) -> Result<(), Box<dyn Error>> {
     let client = Client::builder()
         .emulation(Emulation::Chrome144)
         // .proxy(Proxy::all(env::var("PROXY").unwrap())?)
@@ -156,7 +148,8 @@ async fn update_floor_prices(pool: &PgPool) -> Result<(), Box<dyn Error>> {
     let portal_response = get_portals_collections(&client, short_titles).await?;
 
     let ton_price_in_dollars = get_ton_price(&client).await?;
-    let stars_rate = ton_price_in_dollars / STAR_PRICE_PER_DOLLAR; // just multiplay on floor_in_ton (0.015 - price per star)
+    // just multiplay on floor_in_ton (0.015 - price per star)
+    let stars_rate = ton_price_in_dollars / config.star_price_per_dollar;
 
     let models = get_all_models_item(&pool).await?;
     let backdrops = get_all_backdrops_item(&pool).await?;
@@ -193,13 +186,17 @@ async fn update_floor_prices(pool: &PgPool) -> Result<(), Box<dyn Error>> {
                 p.models.get(&*model_name).copied()
             });
             let x_floor = x_gift_data.as_ref().and_then(|x| {
-                x.models.get(&*model_name).map(|m| calculate_x_floor(m))
+                x.models.get(&*model_name).map(|m| calculate_x_floor(m, config))
             });
 
             let search_key = (collection.short_title.clone(), model_name.clone());
             if let Some(model_db) = models.get(&search_key) {
                 if let Some(final_floor)
-                    = calculate_final_floor(p_floor, x_floor, model_db.floor_price, stars_rate) {
+                    = calculate_final_floor(config,
+                                            p_floor,
+                                            x_floor,
+                                            model_db.floor_price, 
+                                            stars_rate) {
                     if final_floor != model_db.floor_price {
                         models_to_update.push(PriceUpdateModel {
                             id: model_db.id,
@@ -215,13 +212,17 @@ async fn update_floor_prices(pool: &PgPool) -> Result<(), Box<dyn Error>> {
                 p.backdrops.get(&*backdrop_name).copied()
             });
             let x_floor = x_gift_data.as_ref().and_then(|x| {
-                x.backdrops.get(&*backdrop_name).map(|m| calculate_x_floor(m))
+                x.backdrops.get(&*backdrop_name).map(|b| calculate_x_floor(b, config))
             });
 
             let search_key = (collection.short_title.clone(), backdrop_name.clone());
             if let Some(backdrop_db) = backdrops.get(&search_key) {
                 if let Some(final_floor)
-                    = calculate_final_floor(p_floor, x_floor, backdrop_db.floor_price, stars_rate) {
+                    = calculate_final_floor(config,
+                                            p_floor,
+                                            x_floor,
+                                            backdrop_db.floor_price,
+                                            stars_rate) {
                     if final_floor != backdrop_db.floor_price {
                         backdrops_to_update.push(PriceUpdateBackdrop {
                             id: backdrop_db.id,
@@ -239,10 +240,10 @@ async fn update_floor_prices(pool: &PgPool) -> Result<(), Box<dyn Error>> {
     Ok(())
 }
 
-fn calculate_x_floor(item: &XGiftItem) -> f32 {
+fn calculate_x_floor(item: &XGiftItem, config: &AppConfig) -> f32 {
     let mut min_price = item.floor_price_ton.min(item.avg30d_price);
 
-    if item.deals30d_count < 30 {
+    if item.deals30d_count < config.min_reliable_deals {
         min_price = min_price.min(item.avg60d_price);
     }
 
@@ -250,6 +251,7 @@ fn calculate_x_floor(item: &XGiftItem) -> f32 {
 }
 
 fn calculate_final_floor(
+    config: &AppConfig,
     p_floor: Option<f32>,
     x_floor: Option<f32>,
     db_floor: i32,
@@ -264,13 +266,14 @@ fn calculate_final_floor(
 
     let api_floor_stars = api_floor * stars_rate;
 
-    let final_floor = if db_floor == DEFAULT_FLOOR_PRICE {
+    let final_floor = if db_floor == config.floor_price_default {
         api_floor_stars
     } else {
-        (db_floor as f32) * HISTORICAL_PRICE_WEIGHT + api_floor_stars * NEW_API_PRICE_WEIGHT
+        (db_floor as f32) * config.historical_price_weight
+            + api_floor_stars * config.new_api_price_weight
     };
 
-    Some(final_floor.max(MIN_FLOOR_PRICE).round() as i32)
+    Some(final_floor.max(config.floor_price_for_calc).round() as i32)
 }
 
 async fn get_portals_collections(client: &Client, short_titles: String)

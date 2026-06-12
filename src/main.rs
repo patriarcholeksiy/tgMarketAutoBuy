@@ -1,15 +1,15 @@
 pub mod floors;
 pub mod accounts;
 pub mod sniper;
+mod config;
 
 use crate::accounts::pool::AccountPool;
 use crate::accounts::requests::build_targets_with_combos;
+use crate::config::AppConfig;
 use crate::floors::cache::Cache;
 use crate::sniper::runner::start_runner;
-use dotenvy::dotenv;
 use sqlx::migrate;
 use sqlx::postgres::PgPoolOptions;
-use std::env;
 use std::sync::Arc;
 use std::time::Duration;
 use tracing::level_filters::LevelFilter;
@@ -20,33 +20,28 @@ use tracing_subscriber::{fmt, EnvFilter};
 
 #[tokio::main]
 async fn main() -> Result<(), sqlx::Error>{
-    dotenv().ok();
 
     let _log_guard = init_tracing();
 
-    let db_url = env::var("DATABASE_URL").expect("DB url didn't found");
+    let config = Arc::new(AppConfig::load());
 
     let pool = PgPoolOptions::new()
-        .max_connections(1)
-        .connect(&db_url)
+        .max_connections(2)
+        .connect(&config.database_url)
         .await?;
 
     migrate!("./migrations").run(&pool).await?;
 
-    // run(&pool).await.unwrap();
+    let cache = Arc::new(Cache::init(&pool).await?);
+    let acc_pool = AccountPool::init(&pool, &config).await;
 
-    let cache = Cache::init(&pool).await?;
-
-    let acc_pool = AccountPool::init(&pool).await;
-
-    let request = build_targets_with_combos(&pool).await?;
+    let requests = build_targets_with_combos(&pool).await?;
 
     let sniper_handle = tokio::spawn(async move {
-        start_runner(acc_pool, Arc::new(cache), request).await;
+        start_runner(acc_pool, cache, requests, config).await;
     });
 
     tokio::signal::ctrl_c().await?;
-
     sniper_handle.abort();
 
     tokio::time::sleep(Duration::from_secs(2)).await;
