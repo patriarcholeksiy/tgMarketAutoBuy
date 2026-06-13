@@ -1,3 +1,4 @@
+use std::sync::Arc;
 use arc_swap::ArcSwap;
 use rustc_hash::{FxHashMap};
 use sqlx::PgPool;
@@ -12,5 +13,14 @@ impl Cache {
         let map = get_all_floor_active_collections(pool).await?;
         tracing::info!("Successfully loaded {} cache entries", map.len());
         Ok(Cache { floor_prices: ArcSwap::from_pointee(map) })
+    }
+
+    pub async fn update(&self, pool: &PgPool) -> Result<(), sqlx::Error>{
+        match get_all_floor_active_collections(&pool).await {
+            Ok(new_map) => self.floor_prices.store(Arc::new(new_map)),
+            Err(err) => return Err(err)
+        }
+
+        Ok(())
     }
 }

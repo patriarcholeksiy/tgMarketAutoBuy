@@ -1,5 +1,3 @@
-use crate::config::AppConfig;
-
 pub struct SniperStrategy;
 
 impl SniperStrategy {

@@ -1,3 +1,5 @@
+use std::sync::Arc;
+use arc_swap::ArcSwapOption;
 use dotenvy::dotenv;
 use serde::Deserialize;
 
@@ -5,6 +7,7 @@ fn default_market_poll_ms() -> usize { 1610 }
 fn default_num() -> i64 { 5 }
 fn default_den() -> i64 { 2 }
 
+fn default_backdrop_x_gift_reduction_factor() -> f32 { 0.75 }
 fn default_min_reliable_deal() -> u16 { 30 }
 fn default_floor_price() -> i32 { 125 }
 fn default_floor_price_calc() -> f32 { 125.0 }
@@ -15,6 +18,9 @@ fn default_new_api_price_weight() -> f32 { 0.3 }
 #[derive(Debug, Deserialize, Clone)]
 pub struct AppConfig {
     pub database_url: String,
+
+    pub bot_token: String,
+    pub admin_user_id: i64,
 
     // default var for auth tg client
     pub default_api_id: i32,
@@ -33,6 +39,8 @@ pub struct AppConfig {
     #[serde(default = "default_den")]
     pub coeff_den: i64,
 
+    #[serde(default = "default_backdrop_x_gift_reduction_factor")]
+    pub backdrop_x_gift_reduction_factor: f32,
     #[serde(default = "default_min_reliable_deal")]
     pub min_reliable_deals: u16,
     #[serde(default = "default_floor_price")]
@@ -46,8 +54,8 @@ pub struct AppConfig {
     #[serde(default = "default_new_api_price_weight")]
     pub new_api_price_weight: f32,
 
-    // slippage for target price in payment form
-    // pub max_slippage_nano_ton: i64
+    #[serde(skip)]
+    pub current_wreq_proxy: Arc<ArcSwapOption<String>>,
 }
 
 impl AppConfig {
@@ -56,7 +64,6 @@ impl AppConfig {
 
     pub fn load() -> Self {
         dotenv().ok();
-        let config = envy::from_env::<AppConfig>().expect("Failed to load config");
-        config
+        envy::from_env::<AppConfig>().expect("Failed to load config")
     }
 }

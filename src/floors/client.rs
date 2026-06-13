@@ -13,7 +13,7 @@ use wreq::{Client, Proxy};
 use wreq_util::Emulation;
 use crate::config::AppConfig;
 
-pub async fn run(pool: &PgPool, config: &AppConfig) -> Result<(), Box<dyn Error>> {
+pub async fn run(pool: &PgPool, config: &AppConfig) -> Result<(), Box<dyn Error + Send + Sync>> {
     sync_telegram_collections(pool, config).await?;
     tracing::info!("Sync collections end");
 
@@ -23,7 +23,7 @@ pub async fn run(pool: &PgPool, config: &AppConfig) -> Result<(), Box<dyn Error>
     Ok(())
 }
 
-async fn sync_telegram_collections(pool: &PgPool, config: &AppConfig) -> Result<(), Box<dyn Error>> {
+async fn sync_telegram_collections(pool: &PgPool, config: &AppConfig) -> Result<(), Box<dyn Error + Send + Sync>> {
     let (viewer, _) = ferogram::Client::builder()
         .api_id(config.default_api_id)
         .api_hash(&config.default_api_hash)
@@ -131,13 +131,18 @@ async fn sync_telegram_collections(pool: &PgPool, config: &AppConfig) -> Result<
     Ok(())
 }
 
-async fn update_floor_prices(pool: &PgPool, config: &AppConfig) -> Result<(), Box<dyn Error>> {
-    let client = Client::builder()
+async fn update_floor_prices(pool: &PgPool, config: &AppConfig) -> Result<(), Box<dyn Error + Send + Sync>> {
+    let mut builder = Client::builder()
         .emulation(Emulation::Chrome144)
-        // .proxy(Proxy::all(env::var("PROXY").unwrap())?)
         .cookie_store(true)
-        .timeout(Duration::from_secs(10))
-        .build()?;
+        .timeout(Duration::from_secs(10));
+
+    if let Some(proxy_arc) = config.current_wreq_proxy.load_full() {
+        let proxy_str = proxy_arc.as_ref();
+        builder = builder.proxy(Proxy::all(proxy_str)?);
+    }
+
+    let client = builder.build()?;
 
     let collections = fetch_all_collections(pool).await?;
 
@@ -208,18 +213,19 @@ async fn update_floor_prices(pool: &PgPool, config: &AppConfig) -> Result<(), Bo
         }
 
         for backdrop_name in unique_backdrops {
-            let p_floor = collection_portals.and_then(|p| {
-                p.backdrops.get(&*backdrop_name).copied()
-            });
+            // let p_floor = collection_portals.and_then(|p| {
+            //     p.backdrops.get(&*backdrop_name).copied()
+            // });
             let x_floor = x_gift_data.as_ref().and_then(|x| {
-                x.backdrops.get(&*backdrop_name).map(|b| calculate_x_floor(b, config))
+                x.backdrops.get(&*backdrop_name).map(|b| calculate_x_floor(b, config) * config.backdrop_x_gift_reduction_factor)
             });
 
             let search_key = (collection.short_title.clone(), backdrop_name.clone());
             if let Some(backdrop_db) = backdrops.get(&search_key) {
                 if let Some(final_floor)
                     = calculate_final_floor(config,
-                                            p_floor,
+                                            // p_floor,
+                                            None,
                                             x_floor,
                                             backdrop_db.floor_price,
                                             stars_rate) {
@@ -281,6 +287,7 @@ async fn get_portals_collections(client: &Client, short_titles: String)
     let mut portals_url
         = "https://portal-market.com/api/collections/filters?short_names=".to_string();
     portals_url.push_str(&*short_titles);
+    println!("{portals_url}");
     for _ in 0..5 {
         if let Ok(response) = client.get(&portals_url).timeout(Duration::from_secs(30)).send().await {
             if let Ok(portals_response) = response.json::<PortalsResponse>().await {

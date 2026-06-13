@@ -3,6 +3,7 @@ pub mod accounts;
 pub mod sniper;
 mod config;
 
+use crate::accounts::bot;
 use crate::accounts::pool::AccountPool;
 use crate::accounts::requests::build_targets_with_combos;
 use crate::config::AppConfig;
@@ -12,7 +13,6 @@ use sqlx::migrate;
 use sqlx::postgres::PgPoolOptions;
 use std::sync::Arc;
 use std::time::Duration;
-use tracing::level_filters::LevelFilter;
 use tracing_appender::rolling::{Builder, Rotation};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -33,6 +33,9 @@ async fn main() -> Result<(), sqlx::Error>{
     migrate!("./migrations").run(&pool).await?;
 
     let cache = Arc::new(Cache::init(&pool).await?);
+
+    bot::init(&pool, Arc::clone(&cache), &config).await.expect("Err init bot admin");
+
     let acc_pool = AccountPool::init(&pool, &config).await;
 
     let requests = build_targets_with_combos(&pool).await?;
@@ -70,9 +73,8 @@ fn init_tracing() -> tracing_appender::non_blocking::WorkerGuard {
 
     tracing_subscriber::registry()
         .with(
-            EnvFilter::builder()
-                .with_default_directive(LevelFilter::INFO.into())
-                .from_env_lossy()
+            EnvFilter::try_from_default_env()
+                .unwrap_or_else(|_| EnvFilter::new("info,ferogram=error"))
         )
         .with(file_layer)
         .with(stdout_layer)
