@@ -37,16 +37,6 @@ pub async fn start_runner(pool: AccountPool,
 
     let default_fallback_price = ((125 * num) / den) as i32;
 
-    if pool.viewers.is_empty() {
-        tracing::error!("Doesn't have viewers for scan market!");
-        panic!("len viewers = 0")
-    }
-
-    if pool.buyers.is_empty() {
-        tracing::error!("Doesn't have buyers for buy!");
-        panic!("len buyers = 0")
-    }
-
     for (i, viewer) in pool.viewers.into_iter().enumerate() {
         let context = Context {
             buyers: Arc::clone(&pool.buyers),

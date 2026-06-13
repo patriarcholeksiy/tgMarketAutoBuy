@@ -3,12 +3,13 @@ pub mod accounts;
 pub mod sniper;
 mod config;
 
-use crate::accounts::bot;
+use crate::accounts::init_bot;
 use crate::accounts::pool::AccountPool;
 use crate::accounts::requests::build_targets_with_combos;
 use crate::config::AppConfig;
 use crate::floors::cache::Cache;
-use crate::sniper::runner::start_runner;
+use crate::sniper::start_runner;
+use anyhow::{Context, Result};
 use sqlx::migrate;
 use sqlx::postgres::PgPoolOptions;
 use std::sync::Arc;
@@ -19,7 +20,7 @@ use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{fmt, EnvFilter};
 
 #[tokio::main]
-async fn main() -> Result<(), sqlx::Error>{
+async fn main() -> Result<()> {
 
     let _log_guard = init_tracing();
 
@@ -30,24 +31,49 @@ async fn main() -> Result<(), sqlx::Error>{
         .connect(&config.database_url)
         .await?;
 
-    migrate!("./migrations").run(&pool).await?;
+    migrate!("./migrations").run(&pool).await.context("Failed to run migraions")?;
 
-    let cache = Arc::new(Cache::init(&pool).await?);
+    let cache = Arc::new(Cache::init(&pool).await.context("Failed to init cache")?);
 
-    bot::init(&pool, Arc::clone(&cache), &config).await.expect("Err init bot admin");
+    let bot_pool = pool.clone();
+    let bot_cache = Arc::clone(&cache);
+    let bot_config = Arc::clone(&config);
+    let mut bot_handle = tokio::spawn(async move {
+        if let Err(e) = init_bot(&bot_pool, bot_cache, &bot_config).await {
+            tracing::error!("Bot admin error: {e:#}");
+            return Err(e);
+        }
+        Ok::<(), anyhow::Error>(())
+    });
 
-    let acc_pool = AccountPool::init(&pool, &config).await;
+    let acc_pool = AccountPool::init(&pool, &config).await.context("Failed init account pool")?;
 
-    let requests = build_targets_with_combos(&pool).await?;
+    let requests = build_targets_with_combos(&pool)
+        .await
+        .context("Failed to build targets")?;
 
-    let sniper_handle = tokio::spawn(async move {
+    let mut sniper_handle = tokio::spawn(async move {
         start_runner(acc_pool, cache, requests, config).await;
     });
 
-    tokio::signal::ctrl_c().await?;
-    sniper_handle.abort();
+    tokio::select! {
+        _ = tokio::signal::ctrl_c() => {
+            tracing::info!("Shutting down...");
+        }
+        bot_res = &mut bot_handle => {
+            tracing::error!("CRITICAL: Bot task stopped unexpectedly!");
+            anyhow::bail!("Bot task stopped: {:?}", bot_res);
+        }
+        sniper_res = &mut sniper_handle => {
+            tracing::error!("CRITICAL: Sniper task stopped unexpectedly!");
+            anyhow::bail!("Sniper task stopped: {:?}", sniper_res);
+        }
+    }
 
-    tokio::time::sleep(Duration::from_secs(2)).await;
+    sniper_handle.abort();
+    bot_handle.abort();
+
+    let _ = tokio::join!(sniper_handle, bot_handle);
     
     Ok(())
 }

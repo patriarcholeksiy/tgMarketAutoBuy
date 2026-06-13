@@ -1,29 +1,29 @@
 use crate::floors::models::{Backdrop, Collection, Model};
 use crate::floors::db::{bulk_update_backdrops, bulk_update_models, fetch_all_collections, fetch_all_tg_ids, fetch_collections_without_models, get_all_backdrops_item, get_all_models_item, save_new_backdrops, save_new_collections, save_new_models, PriceUpdateBackdrop, PriceUpdateModel};
 use crate::floors::payload::{BybitResponse, PortalsResponse, PortalsResponseMap, XGiftItem, XGiftResponse, XGiftResponseMap};
+use anyhow::{Context, Result, bail};
 use ferogram::tl::enums::payments::{StarGiftUpgradeAttributes, StarGifts};
 use ferogram::tl::enums::{Document, StarGift, StarGiftAttribute};
 use ferogram::tl::functions;
 use ferogram::OverflowStrategy;
 use sqlx::PgPool;
 use std::collections::HashSet;
-use std::error::Error;
 use std::time::Duration;
 use wreq::{Client, Proxy};
 use wreq_util::Emulation;
 use crate::config::AppConfig;
 
-pub async fn run(pool: &PgPool, config: &AppConfig) -> Result<(), Box<dyn Error + Send + Sync>> {
-    sync_telegram_collections(pool, config).await?;
+pub async fn run(pool: &PgPool, config: &AppConfig) -> Result<()> {
+    sync_telegram_collections(pool, config).await.context("Failed to sync telegram collections")?;
     tracing::info!("Sync collections end");
 
-    update_floor_prices(pool, config).await?;
+    update_floor_prices(pool, config).await.context("Failed to update floor prices")?;
     tracing::info!("Update end!");
 
     Ok(())
 }
 
-async fn sync_telegram_collections(pool: &PgPool, config: &AppConfig) -> Result<(), Box<dyn Error + Send + Sync>> {
+async fn sync_telegram_collections(pool: &PgPool, config: &AppConfig) -> Result<()> {
     let (viewer, _) = ferogram::Client::builder()
         .api_id(config.default_api_id)
         .api_hash(&config.default_api_hash)
@@ -37,18 +37,17 @@ async fn sync_telegram_collections(pool: &PgPool, config: &AppConfig) -> Result<
         hash: 0,
     }).await?;
 
-    let existing_ids = fetch_all_tg_ids(pool).await?;
+    let existing_ids = fetch_all_tg_ids(pool).await.context("Failed to fetch existing TG IDs")?;
 
     let mut new_collections_for_save = Vec::new();
     match collections {
-        StarGifts::NotModified => { return Err(Box::from("Collections unfounded")) }
+        StarGifts::NotModified => bail!("Star gifts not modified"),
         StarGifts::StarGifts(star_gifts) => {
             for star_gift in star_gifts.gifts {
                 match star_gift {
                     StarGift::StarGift(star_gift) => {
-                        if star_gift.title.is_some() && star_gift.availability_resale.is_some() {
+                        if let (Some(title), Some(_resale)) = (star_gift.title, star_gift.availability_resale) {
                             if !existing_ids.contains(&star_gift.id) {
-                                let title = star_gift.title.expect("REASON");
                                 let short_title: String = title
                                     .to_lowercase()
                                     .chars()
@@ -71,9 +70,9 @@ async fn sync_telegram_collections(pool: &PgPool, config: &AppConfig) -> Result<
         }
     }
 
-    save_new_collections(pool, new_collections_for_save).await?;
+    save_new_collections(pool, new_collections_for_save).await.context("Failed to save new collections")?;
 
-    let collections_without_models = fetch_collections_without_models(pool).await?;
+    let collections_without_models = fetch_collections_without_models(pool).await.context("Failed to fetch collections without models")?;
 
     for collection in collections_without_models {
         tracing::info!("Get attributes for {}", collection.title);
@@ -131,7 +130,7 @@ async fn sync_telegram_collections(pool: &PgPool, config: &AppConfig) -> Result<
     Ok(())
 }
 
-async fn update_floor_prices(pool: &PgPool, config: &AppConfig) -> Result<(), Box<dyn Error + Send + Sync>> {
+async fn update_floor_prices(pool: &PgPool, config: &AppConfig) -> Result<()> {
     let mut builder = Client::builder()
         .emulation(Emulation::Chrome144)
         .cookie_store(true)
@@ -144,15 +143,15 @@ async fn update_floor_prices(pool: &PgPool, config: &AppConfig) -> Result<(), Bo
 
     let client = builder.build()?;
 
-    let collections = fetch_all_collections(pool).await?;
+    let collections = fetch_all_collections(pool).await.context("Failed to fetch all collections")?;
 
     let short_titles = collections.iter()
         .map(|c| c.short_title.as_str())
         .collect::<Vec<&str>>()
         .join(",");
-    let portal_response = get_portals_collections(&client, short_titles).await?;
+    let portal_response = get_portals_collections(&client, short_titles).await.context("Failed to get portals collections")?;
 
-    let ton_price_in_dollars = get_ton_price(&client).await?;
+    let ton_price_in_dollars = get_ton_price(&client).await.context("Failed to get TON price")?;
     // just multiplay on floor_in_ton (0.015 - price per star)
     let stars_rate = ton_price_in_dollars / config.star_price_per_dollar;
 
@@ -283,7 +282,7 @@ fn calculate_final_floor(
 }
 
 async fn get_portals_collections(client: &Client, short_titles: String)
-    -> Result<PortalsResponseMap, String> {
+    -> Result<PortalsResponseMap> {
     let mut portals_url
         = "https://portal-market.com/api/collections/filters?short_names=".to_string();
     portals_url.push_str(&*short_titles);
@@ -297,11 +296,11 @@ async fn get_portals_collections(client: &Client, short_titles: String)
         tokio::time::sleep(Duration::from_secs(2)).await;
     }
     tracing::error!("Can't get response from portals");
-    Err("Can't get response from portals".into())
+    bail!("Can't get response from portals")
 }
 
-async fn get_x_gift_collection(client: &Client, short_title: &String)
-    -> Result<XGiftResponseMap, String> {
+async fn get_x_gift_collection(client: &Client, short_title: &str)
+    -> Result<XGiftResponseMap> {
     let mut x_gift_url = "https://bot.xgift.tg/gifts/filters/".to_string();
     x_gift_url.push_str(&short_title);
     x_gift_url.push_str("?collectionType=upgradable");
@@ -322,10 +321,10 @@ async fn get_x_gift_collection(client: &Client, short_title: &String)
         }
     }
     tracing::warn!("Can't get response from xGift for {short_title}");
-    Err(format!("Can't get response from xGift for {short_title}").into())
+    bail!("Can't get response from xGift for {short_title}")
 }
 
-async fn get_ton_price(client: &Client) -> Result<f32, String> {
+async fn get_ton_price(client: &Client) -> Result<f32> {
     let url = "https://api.bybit.com/v5/market/tickers?category=spot&symbol=TONUSDT";
 
     if let Ok(response) = client.get(url).send().await {
@@ -337,6 +336,5 @@ async fn get_ton_price(client: &Client) -> Result<f32, String> {
             }
         }
     }
-    Err("Can't get ton price".into())
+    bail!("Can't get ton price")
 }
-

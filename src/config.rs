@@ -3,6 +3,9 @@ use arc_swap::ArcSwapOption;
 use dotenvy::dotenv;
 use serde::Deserialize;
 
+fn default_portals_username() -> String { "GiftsToPortals".to_string() }
+fn default_portals_id() -> i64 { 7804544881 }
+
 fn default_market_poll_ms() -> usize { 1610 }
 fn default_num() -> i64 { 5 }
 fn default_den() -> i64 { 2 }
@@ -22,6 +25,9 @@ pub struct AppConfig {
     pub bot_token: String,
     pub admin_user_id: i64,
 
+    pub portals_username: String,
+    pub portals_id: i64,
+
     // default var for auth tg client
     pub default_api_id: i32,
     pub default_api_hash: String,
@@ -30,7 +36,6 @@ pub struct AppConfig {
 
     #[serde(default = "default_market_poll_ms")]
     pub market_poll_ms: usize,
-
     // it is necessary to calculate how much the floor
     // of the price should be greater than or equal to
     // the selling price of the gift.

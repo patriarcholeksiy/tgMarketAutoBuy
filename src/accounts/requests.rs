@@ -4,10 +4,14 @@ use ferogram::tl::functions::payments::GetResaleStarGifts;
 use ferogram::tl::types::StarGiftAttributeIdModel;
 use sqlx::PgPool;
 use crate::accounts::db::get_active_collection_stickers;
+use anyhow::{Context, Result};
 
 pub async fn build_targets_with_combos(pg_pool: &PgPool)
-    -> Result<Arc<[Arc<[GetResaleStarGifts]>]>, sqlx::Error> {
-    let collection_stickers = get_active_collection_stickers(pg_pool).await?;
+    -> Result<Arc<[Arc<[GetResaleStarGifts]>]>> {
+    let collection_stickers = get_active_collection_stickers(pg_pool)
+        .await
+        .context("Failed to get active collection stickers from DB")?;
+        
     let mut all_targets = Vec::with_capacity(collection_stickers.len());
     let mut total_combinations = 0usize;
 
