@@ -70,21 +70,30 @@ pub async fn start_runner(acc_pool: AccountPool,
                 let resale_star_gifts = match invoke_result {
                     Ok(res) => res,
                     Err(err) => {
-                        if let Some(seconds) = err.flood_wait_seconds() {
-                            tracing::warn!("Client get flood wait to {seconds} seconds");
-                            tokio::time::sleep(Duration::from_secs(seconds + 2)).await;
-                        } else if let InvocationError::Rpc(rpc_err) = err {
-                            if rpc_err.name == "FROZEN_METHOD_INVALID" || rpc_err.code == 401 {
-                                tracing::error!("CRITICAL: Client {account_id} with phone {phone:?} received fatal error {}: {}. Stopping task...", rpc_err.code, rpc_err.name);
-                                AccountPool::deactivate_account(&context.pg_pool, account_id, rpc_err.code).await;
-                                break;
-                            } else {
-                                tracing::warn!("RPC error during invocation {}: {}", rpc_err.code, rpc_err.name);
+                        match err {
+                            e if e.flood_wait_seconds().is_some() => {
+                                let seconds = e.flood_wait_seconds().unwrap();
+                                tracing::warn!("Client get flood wait to {seconds} seconds");
+                                tokio::time::sleep(Duration::from_secs(seconds + 2)).await;
+                                continue
                             }
-                        } else {
-                            tracing::warn!("Cannot invoke request, err - {err:?}");
+                            InvocationError::Rpc(rpc_err) if rpc_err.code == 401 || rpc_err.name == "FROZEN_METHOD_INVALID" => {
+                                tracing::error!(
+                                    "CRITICAL: Client {account_id} with phone {phone:?} received fatal error {}: {}. Stopping task...",
+                                    rpc_err.code, rpc_err.name
+                                );
+                                AccountPool::deactivate_account(&context.pg_pool, account_id, rpc_err.code).await;
+                                break
+                            }
+                            InvocationError::Rpc(rpc_err) => {
+                                tracing::warn!("RPC error during invocation {}: {}", rpc_err.code, rpc_err.name);
+                                continue
+                            }
+                            _ => {
+                                tracing::warn!("Cannot invoke request, err - {err:?}");
+                                continue
+                            }
                         }
-                        continue
                     },
                 };
 
