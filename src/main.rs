@@ -13,7 +13,6 @@ use anyhow::{Context, Result};
 use sqlx::migrate;
 use sqlx::postgres::PgPoolOptions;
 use std::sync::Arc;
-use std::time::Duration;
 use tracing_appender::rolling::{Builder, Rotation};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -53,7 +52,7 @@ async fn main() -> Result<()> {
         .context("Failed to build targets")?;
 
     let mut sniper_handle = tokio::spawn(async move {
-        start_runner(acc_pool, cache, requests, config).await;
+        start_runner(acc_pool, cache, requests, config, pool).await;
     });
 
     tokio::select! {

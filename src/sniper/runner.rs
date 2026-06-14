@@ -1,13 +1,14 @@
 use std::sync::Arc;
 use std::sync::atomic::{AtomicUsize, Ordering};
 use std::time::Duration;
-use ferogram::{Client};
+use ferogram::{Client, InvocationError};
 use ferogram::tl::enums::{InputPeer, LabeledPrice};
 use ferogram::tl::enums::Invoice::Invoice;
 use ferogram::tl::enums::payments::{PaymentForm, ResaleStarGifts};
 use ferogram::tl::functions;
 use ferogram::tl::functions::payments::GetResaleStarGifts;
 use ferogram::tl::types::{InputInvoiceStarGiftResale};
+use sqlx::PgPool;
 use tokio::task::{JoinSet};
 use crate::accounts::pool::AccountPool;
 use crate::accounts::telegram::ParsedGift;
@@ -21,29 +22,32 @@ pub struct Context {
     pub requests: Arc<[Arc<[GetResaleStarGifts]>]>,
     pub config: Arc<AppConfig>,
     pub counter: Arc<AtomicUsize>,
+    pub pg_pool: PgPool,
 }
 
-pub async fn start_runner(pool: AccountPool,
+pub async fn start_runner(acc_pool: AccountPool,
                           cache: Arc<Cache>,
                           requests: Arc<[Arc<[GetResaleStarGifts]>]>,
-                          config: Arc<AppConfig>) {
+                          config: Arc<AppConfig>,
+                          pg_pool: PgPool) {
 
     let counter = Arc::new(AtomicUsize::new(0));
     let requests_len = requests.len();
-    let len_v = pool.viewers.len();
+    let len_v = acc_pool.viewers.len();
 
     let num = config.coeff_num;
     let den = config.coeff_den;
 
     let default_fallback_price = ((125 * num) / den) as i32;
 
-    for (i, viewer) in pool.viewers.into_iter().enumerate() {
+    for (i, (viewer, account_id, phone)) in acc_pool.viewers.into_iter().enumerate() {
         let context = Context {
-            buyers: Arc::clone(&pool.buyers),
+            buyers: Arc::clone(&acc_pool.buyers),
             cache: Arc::clone(&cache),
             requests: Arc::clone(&requests),
             config: Arc::clone(&config),
             counter: Arc::clone(&counter),
+            pg_pool: pg_pool.clone(),
         };
 
         tokio::time::sleep(Duration::from_millis((context.config.market_poll_ms / len_v * i) as u64)).await;
@@ -69,6 +73,14 @@ pub async fn start_runner(pool: AccountPool,
                         if let Some(seconds) = err.flood_wait_seconds() {
                             tracing::warn!("Client get flood wait to {seconds} seconds");
                             tokio::time::sleep(Duration::from_secs(seconds + 2)).await;
+                        } else if let InvocationError::Rpc(rpc_err) = err {
+                            if rpc_err.name == "FROZEN_METHOD_INVALID" || rpc_err.code == 401 {
+                                tracing::error!("CRITICAL: Client {account_id} with phone {phone:?} received fatal error {}: {}. Stopping task...", rpc_err.code, rpc_err.name);
+                                AccountPool::deactivate_account(&context.pg_pool, account_id, rpc_err.code).await;
+                                break;
+                            } else {
+                                tracing::warn!("RPC error during invocation {}: {}", rpc_err.code, rpc_err.name);
+                            }
                         } else {
                             tracing::warn!("Cannot invoke request, err - {err:?}");
                         }

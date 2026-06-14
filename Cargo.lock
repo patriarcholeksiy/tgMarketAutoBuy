@@ -2438,11 +2438,9 @@ version = "0.1.0"
 dependencies = [
  "anyhow",
  "arc-swap",
- "base64",
  "dotenvy",
  "envy",
  "ferogram",
- "hex",
  "rustc-hash",
  "serde",
  "serde_json",

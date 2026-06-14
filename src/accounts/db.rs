@@ -7,8 +7,17 @@ pub enum AccountRole {
     Buyer
 }
 
+#[derive(Debug, sqlx::Type)]
+#[sqlx(type_name = "account_status", rename_all = "lowercase")]
+pub enum AccountStatus {
+    Active,
+    Frozen,
+    Unauthorized
+}
+
 #[derive(Debug)]
 pub struct Account {
+    pub id: i32,
     pub api_id: Option<i32>,
     pub api_hash: Option<String>,
     pub phone: Option<String>,
@@ -21,6 +30,7 @@ pub async fn get_active_accounts(pg_pool: &PgPool) -> Result<Vec<Account>, sqlx:
         Account,
         r#"
         SELECT
+            app.id,
             app.api_id AS "api_id?",
             app.api_hash AS "api_hash?",
             acc.phone,
@@ -33,6 +43,15 @@ pub async fn get_active_accounts(pg_pool: &PgPool) -> Result<Vec<Account>, sqlx:
         "#
     ).fetch_all(pg_pool).await?;
     Ok(accounts)
+}
+
+pub async fn deactivate_account_by_id(pg_pool: &PgPool, id: i32, status: AccountStatus)
+    -> Result<(), sqlx::Error> {
+    sqlx::query!(
+        "UPDATE accounts SET status = $1::account_status WHERE id = $2",
+        status as _, id
+    ).execute(pg_pool).await?;
+    Ok(())
 }
 
 pub struct CollectionStickers {

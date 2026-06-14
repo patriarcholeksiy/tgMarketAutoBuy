@@ -1,4 +1,4 @@
-use crate::accounts::db::{get_active_accounts, Account, AccountRole};
+use crate::accounts::db::{deactivate_account_by_id, get_active_accounts, Account, AccountRole, AccountStatus};
 use crate::config::AppConfig;
 use anyhow::{bail, Context, Result};
 use ferogram::tl::enums::contacts::ResolvedPeer;
@@ -12,7 +12,7 @@ use std::time::Duration;
 
 pub struct AccountPool {
     pub buyers: Arc<[(Client, InputPeer)]>,
-    pub viewers: Vec<Client>
+    pub viewers: Vec<(Client, i32, Option<String>)>
 }
 
 impl AccountPool {
@@ -44,7 +44,7 @@ impl AccountPool {
                 },
                 AccountRole::Viewer => {
                     tracing::info!("Viewer client {:?} logged in", account.phone);
-                    viewers.push(client) }
+                    viewers.push((client, account.id, account.phone)) }
             }
             tokio::time::sleep(Duration::from_millis(65)).await;
         }
@@ -95,13 +95,13 @@ impl AccountPool {
         }))
     }
 
-    #[inline(always)]
-    pub fn get_buyers_client(&self, index: usize) -> &(Client, InputPeer) {
-        &self.buyers[index % self.buyers.len()]
-    }
-
-    #[inline(always)]
-    pub fn get_viewer_client(&self, index: usize) -> &Client {
-        &self.viewers[index % self.viewers.len()]
+    pub async fn deactivate_account(pg_pool: &PgPool, id: i32, err_code: i32) {
+        let status = match err_code { 
+            401 => AccountStatus::Unauthorized,
+            _ => AccountStatus::Frozen
+        };
+        if let Err(e) = deactivate_account_by_id(pg_pool, id, status).await {
+            tracing::warn!("Failed to deactivate account {id} in DB: {e:?}")
+        }
     }
 }
