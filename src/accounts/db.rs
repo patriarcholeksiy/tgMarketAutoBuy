@@ -30,10 +30,10 @@ pub async fn get_active_accounts(pg_pool: &PgPool) -> Result<Vec<Account>, sqlx:
         Account,
         r#"
         SELECT
-            app.id,
+            acc.id,
             app.api_id AS "api_id?",
             app.api_hash AS "api_hash?",
-            acc.phone,
+            acc.phone AS "phone?",
             acc.session,
             acc.role AS "role: AccountRole"
         FROM accounts AS acc
@@ -51,10 +51,10 @@ pub async fn get_new_active_viewers(pg_pool: &PgPool, existing_ids: &[i32])
         Account,
         r#"
         SELECT
-            app.id,
+            acc.id,
             app.api_id AS "api_id?",
             app.api_hash AS "api_hash?",
-            acc.phone,
+            acc.phone AS "phone?",
             acc.session,
             acc.role AS "role: AccountRole"
         FROM accounts AS acc

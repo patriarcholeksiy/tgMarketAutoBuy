@@ -12,6 +12,12 @@ use std::time::Duration;
 use arc_swap::ArcSwap;
 use tokio::sync::mpsc;
 
+#[derive(Default)]
+pub struct AddViewersReport {
+    pub added: Vec<(i32, Option<String>)>, // id, phone
+    pub failed: Vec<(i32, Option<String>, String)>, // id, phone, err
+}
+
 pub type ViewerData = (Client, i32, Option<String>);
 
 pub struct AccountPool {
@@ -117,7 +123,8 @@ impl AccountPool {
         }))
     }
 
-    pub async fn add_viewers_dynamic(&self, pg_pool: &PgPool, config: &AppConfig) -> Result<()> {
+    pub async fn add_viewers_dynamic(&self, pg_pool: &PgPool, config: &AppConfig)
+        -> Result<AddViewersReport> {
         let active_in_memory_ids = self.viewers.load()
             .iter()
             .map(|v| v.1)
@@ -127,32 +134,40 @@ impl AccountPool {
             .await
             .context("Failed to fetch dynamically added viewers from DB")?;
 
-        if new_accounts.is_empty() { return Ok(()) }
+        let mut report = AddViewersReport::default();
+
+        if new_accounts.is_empty() { return Ok(report) }
 
         for account in new_accounts {
             tracing::info!("Start of new client auth {} with phone: {:?}", account.id, account.phone);
+
             let client = match Self::connect_client(&account, config).await {
                 Ok(client) => client,
                 Err(BuilderError::MissingApiId | BuilderError::MissingApiHash) => {
                     tracing::warn!("Client {} with phone {:?} has invalid api id/hash", account.id, account.phone);
+                    report.failed.push((account.id, account.phone, "Invalid API ID/Hash".to_string()));
                     continue;
                 }
                 Err(BuilderError::Connect(InvocationError::Rpc(rpc_err))) => {
                     if rpc_err.code == 401 || rpc_err.name == "FROZEN_METHOD_INVALID" {
                         tracing::error!("CRITICAL: Client {} received fatal error {}: {}", account.id, rpc_err.code, rpc_err.name);
                         AccountPool::deactivate_account(pg_pool, account.id, rpc_err.code).await;
+
+                        report.failed.push((account.id, account.phone, format!("Banned/Frozen (Code: {})", rpc_err.code)));
                     } else {
                         tracing::warn!("RPC error during invocation {}: {}", rpc_err.code, rpc_err.name);
+                        report.failed.push((account.id, account.phone, format!("RPC Error: {}", rpc_err.name)));
                     }
                     continue;
                 }
                 Err(e) => {
                     tracing::warn!("Other builder error for {}: {:?}", account.id, e);
+                    report.failed.push((account.id, account.phone, "Connection Timeout/Error".to_string()));
                     continue;
                 }
             };
 
-            let new_viewer_data: ViewerData = (client, account.id, account.phone);
+            let new_viewer_data: ViewerData = (client, account.id, account.phone.clone());
 
             self.viewers.rcu(|current_vec| {
                 let mut next_vec = (**current_vec).clone();
@@ -163,9 +178,11 @@ impl AccountPool {
             if let Err(e) = self.new_viewers_tx.send(new_viewer_data) {
                 bail!("MPSC channel closed");
             }
+
+            report.added.push((account.id, account.phone));
         }
 
-        Ok(())
+        Ok(report)
     }
 
     pub async fn deactivate_account(pg_pool: &PgPool, id: i32, err_code: i32) {

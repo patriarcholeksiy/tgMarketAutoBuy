@@ -10,7 +10,7 @@ use crate::floors::client::run;
 pub async fn init_bot(pg_pool: &PgPool,
                       cache: Arc<Cache>,
                       acc_pool: Arc<AccountPool>,
-                      config: &AppConfig)
+                      config: Arc<AppConfig>)
     -> anyhow::Result<()> {
     let (bot, _) = Client::builder()
         .api_id(config.default_api_id)
@@ -69,6 +69,16 @@ pub async fn init_bot(pg_pool: &PgPool,
                             tracing::warn!("Failed to send Gifts and Floors menu message - {e:?}")
                         };
                     }
+                    "Accounts" => {
+                        let inline_kb = InlineKeyboard::new()
+                            .row([
+                                Button::callback("Add new viewers", b"accounts:add_new_viewers"),
+                            ]);
+
+                        if let Err(e) = bot.send_message(sender_id, InputMessage::text("choose").reply_markup(inline_kb)).await {
+                            tracing::warn!("Failed to send Accounts menu message - {e:?}")
+                        };
+                    }
                     proxy if waiting_for_proxy => {
                         if let Some(formatted_proxy) = format_proxy_string(proxy.trim()) {
                             config.current_wreq_proxy.store(Some(Arc::new(formatted_proxy.clone())));
@@ -93,6 +103,11 @@ pub async fn init_bot(pg_pool: &PgPool,
                 }
             }
             Update::CallbackQuery(cb) => {
+                if cb.user_id != config.admin_user_id {
+                    tracing::warn!("Unauthorized callback attempt from ID: {}", cb.user_id);
+                    continue;
+                }
+
                 let data = cb.data().unwrap_or("");
                 match data {
                     "floor:cache" => {
@@ -114,9 +129,9 @@ pub async fn init_bot(pg_pool: &PgPool,
                     "floor:update" => {
                         tracing::info!("Received a callback to update the floors");
 
-                        let cache_clone = Arc::clone(&cache);
                         let pool_clone = pg_pool.clone();
-                        let config_clone = config.clone();
+                        let cache_clone = Arc::clone(&cache);
+                        let config_clone = Arc::clone(&config);
 
                         if let Err(e) = cb.answer().text("Updating floors...").send(&bot).await {
                             tracing::warn!("Failed to answer callback floor:update - {e:?}")
@@ -154,6 +169,57 @@ pub async fn init_bot(pg_pool: &PgPool,
                         if let Err(e) = cb.answer().text("Proxy for market off").send(&bot).await {
                             tracing::warn!("Failed to answer callback off_proxy - {e:?}")
                         };
+                    }
+                    "accounts:add_new_viewers" => {
+                        tracing::info!("Trying add new viewers from DB");
+
+                        let pg_pool_clone = pg_pool.clone();
+                        let acc_pool_clone = Arc::clone(&acc_pool);
+                        let config_clone = Arc::clone(&config);
+
+                        if let Err(e) = cb.answer().text("Add new viewers from DB...").send(&bot).await {
+                            tracing::warn!("Failed to answer callback accounts:add_new_viewers - {e:?}")
+                        };
+
+                        let bot_clone = bot.clone();
+                        tokio::spawn(async move {
+                            let admin_id = config_clone.admin_user_id;
+                            match acc_pool_clone.add_viewers_dynamic(&pg_pool_clone, &config_clone).await {
+                                Ok(report) => {
+                                    let mut msg = String::new();
+
+                                    if report.added.is_empty() && report.failed.is_empty() {
+                                        msg.push_str("ℹ️ There are no new accounts to add.");
+                                    } else {
+                                        if !report.added.is_empty() {
+                                            msg.push_str(&format!("✅ Successfully added: {}\n", report.added.len()));
+
+                                            for (id, phone) in report.added {
+                                                msg.push_str(&format!("• ID {id} with phone {phone:?}\n"));
+                                            }
+                                        }
+
+                                        if !report.failed.is_empty() {
+                                            msg.push_str(&format!("❌ Adding error: {}\n", report.failed.len()));
+                                            for (id, phone, reason) in report.failed {
+                                                msg.push_str(&format!("• ID {id} with phone {phone:?}: {reason}\n"));
+                                            }
+                                        }
+                                    }
+
+                                    tracing::info!("{msg}");
+                                    if let Err(e) = bot_clone.send_message(admin_id, msg).await {
+                                        tracing::warn!("Failed to send message about add new viewers ended - {e:?}")
+                                    };
+                                },
+                                Err(err) => {
+                                    tracing::warn!("Error add new viewers: {:?}", err);
+                                    if let Err(e) = bot_clone.send_message(admin_id, format!("Err when add new viewers - {err:#?})")).await {
+                                        tracing::warn!("Failed to send message about error running update - {e:?}")
+                                    };
+                                }
+                            }
+                        });
                     }
                     _ => {  }
                 }

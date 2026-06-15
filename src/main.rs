@@ -46,7 +46,7 @@ async fn main() -> Result<()> {
     let bot_acc_pool = Arc::clone(&acc_pool);
     let bot_config = Arc::clone(&config);
     let mut bot_handle = tokio::spawn(async move {
-        if let Err(e) = init_bot(&bot_pg_pool, bot_cache, bot_acc_pool, &bot_config).await {
+        if let Err(e) = init_bot(&bot_pg_pool, bot_cache, bot_acc_pool, bot_config).await {
             tracing::error!("Bot admin error: {e:#}");
             return Err(e);
         }
