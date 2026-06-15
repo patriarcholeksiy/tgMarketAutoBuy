@@ -1,22 +1,28 @@
-use crate::accounts::db::{deactivate_account_by_id, get_active_accounts, Account, AccountRole, AccountStatus};
+use crate::accounts::db::{deactivate_account_by_id, get_active_accounts, get_new_active_viewers, Account, AccountRole, AccountStatus};
 use crate::config::AppConfig;
 use anyhow::{bail, Context, Result};
 use ferogram::tl::enums::contacts::ResolvedPeer;
 use ferogram::tl::enums::{InputPeer, User};
 use ferogram::tl::functions::contacts::ResolveUsername;
 use ferogram::tl::types::InputPeerUser;
-use ferogram::{Client, OverflowStrategy};
+use ferogram::{BuilderError, Client, InvocationError, OverflowStrategy};
 use sqlx::PgPool;
 use std::sync::Arc;
 use std::time::Duration;
+use arc_swap::ArcSwap;
+use tokio::sync::mpsc;
+
+pub type ViewerData = (Client, i32, Option<String>);
 
 pub struct AccountPool {
     pub buyers: Arc<[(Client, InputPeer)]>,
-    pub viewers: Vec<(Client, i32, Option<String>)>
+    pub viewers: ArcSwap<Vec<ViewerData>>,
+    pub new_viewers_tx: mpsc::UnboundedSender<ViewerData>
 }
 
 impl AccountPool {
-    pub async fn init(pg_pool: &PgPool, config: &AppConfig) -> Result<Self> {
+    pub async fn init(pg_pool: &PgPool, config: &AppConfig)
+        -> Result<(Self, mpsc::UnboundedReceiver<ViewerData>)> {
         let accounts = get_active_accounts(pg_pool)
             .await
             .context("Failed to get active accounts from DB")?;
@@ -24,13 +30,27 @@ impl AccountPool {
         let mut buyers = Vec::new();
         let mut viewers = Vec::new();
         for account in accounts {
+            tracing::info!("Start of client auth {} with phone: {:?}", account.id, account.phone);
             let client = match Self::connect_client(&account, config).await {
                 Ok(client) => client,
-                Err(err) => {
-                    if matches!(account.role, AccountRole::Buyer) {
-                        return Err(err).context(format!("Buyer account {:?} could not log in", account.phone));
+                Err(e) if matches!(account.role, AccountRole::Buyer) => {
+                    return Err(e).context(format!("Buyer {} account {:?} could not log in", account.id, account.phone));
+                }
+                Err(BuilderError::MissingApiId | BuilderError::MissingApiHash) => {
+                    tracing::warn!("Client {} with phone {:?} has invalid api id/hash", account.id, account.phone);
+                    break;
+                }
+                Err(BuilderError::Connect(InvocationError::Rpc(rpc_err))) => {
+                    if rpc_err.code == 401 || rpc_err.name == "FROZEN_METHOD_INVALID" {
+                        tracing::error!("CRITICAL: Client {} received fatal error {}: {}", account.id, rpc_err.code, rpc_err.name);
+                        AccountPool::deactivate_account(pg_pool, account.id, rpc_err.code).await;
+                    } else {
+                        tracing::warn!("RPC error during invocation {}: {}", rpc_err.code, rpc_err.name);
                     }
-                    tracing::warn!("Viewer account {:?} could not log in: {err:#}", account.phone);
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!("Other builder error for {}: {:?}", account.id, e);
                     continue;
                 }
             };
@@ -57,20 +77,22 @@ impl AccountPool {
         }
 
         tracing::info!("Buyers count - {}\nViewers count - {}", buyers.len(), viewers.len());
-        Ok(AccountPool {
+
+        let (tx, rx) = mpsc::unbounded_channel();
+
+        let acc_pool = AccountPool {
             buyers: Arc::from(buyers),
-            viewers
-        })
+            viewers: ArcSwap::from_pointee(viewers),
+            new_viewers_tx: tx
+        };
+
+        Ok((acc_pool, rx))
     }
 
-    async fn connect_client(account: &Account, config: &AppConfig) -> Result<Client> {
+    async fn connect_client(account: &Account, config: &AppConfig) -> Result<Client, BuilderError> {
         let (client, _) = Client::builder()
-            .api_id(account.api_id.unwrap_or_else(
-                || config.default_api_id
-            ))
-            .api_hash(account.api_hash.clone().unwrap_or_else(
-                || config.default_api_hash.clone()
-            ))
+            .api_id(account.api_id.unwrap_or(config.default_api_id))
+            .api_hash(account.api_hash.clone().unwrap_or(config.default_api_hash.clone()))
             .update_queue_capacity(0)
             .session_string(account.session.clone())
             .update_overflow_strategy(OverflowStrategy::DropNewest)
@@ -95,6 +117,57 @@ impl AccountPool {
         }))
     }
 
+    pub async fn add_viewers_dynamic(&self, pg_pool: &PgPool, config: &AppConfig) -> Result<()> {
+        let active_in_memory_ids = self.viewers.load()
+            .iter()
+            .map(|v| v.1)
+            .collect::<Vec<_>>();
+
+        let new_accounts = get_new_active_viewers(pg_pool, &active_in_memory_ids)
+            .await
+            .context("Failed to fetch dynamically added viewers from DB")?;
+
+        if new_accounts.is_empty() { return Ok(()) }
+
+        for account in new_accounts {
+            tracing::info!("Start of new client auth {} with phone: {:?}", account.id, account.phone);
+            let client = match Self::connect_client(&account, config).await {
+                Ok(client) => client,
+                Err(BuilderError::MissingApiId | BuilderError::MissingApiHash) => {
+                    tracing::warn!("Client {} with phone {:?} has invalid api id/hash", account.id, account.phone);
+                    continue;
+                }
+                Err(BuilderError::Connect(InvocationError::Rpc(rpc_err))) => {
+                    if rpc_err.code == 401 || rpc_err.name == "FROZEN_METHOD_INVALID" {
+                        tracing::error!("CRITICAL: Client {} received fatal error {}: {}", account.id, rpc_err.code, rpc_err.name);
+                        AccountPool::deactivate_account(pg_pool, account.id, rpc_err.code).await;
+                    } else {
+                        tracing::warn!("RPC error during invocation {}: {}", rpc_err.code, rpc_err.name);
+                    }
+                    continue;
+                }
+                Err(e) => {
+                    tracing::warn!("Other builder error for {}: {:?}", account.id, e);
+                    continue;
+                }
+            };
+
+            let new_viewer_data: ViewerData = (client, account.id, account.phone);
+
+            self.viewers.rcu(|current_vec| {
+                let mut next_vec = (**current_vec).clone();
+                next_vec.push(new_viewer_data.clone());
+                next_vec
+            });
+
+            if let Err(e) = self.new_viewers_tx.send(new_viewer_data) {
+                bail!("MPSC channel closed");
+            }
+        }
+
+        Ok(())
+    }
+
     pub async fn deactivate_account(pg_pool: &PgPool, id: i32, err_code: i32) {
         let status = match err_code { 
             401 => AccountStatus::Unauthorized,
@@ -103,5 +176,6 @@ impl AccountPool {
         if let Err(e) = deactivate_account_by_id(pg_pool, id, status).await {
             tracing::warn!("Failed to deactivate account {id} in DB: {e:?}")
         }
+        tracing::info!("Client {id} was deactivated with err_code {err_code}")
     }
 }

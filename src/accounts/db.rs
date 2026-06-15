@@ -45,6 +45,30 @@ pub async fn get_active_accounts(pg_pool: &PgPool) -> Result<Vec<Account>, sqlx:
     Ok(accounts)
 }
 
+pub async fn get_new_active_viewers(pg_pool: &PgPool, existing_ids: &[i32])
+    -> Result<Vec<Account>, sqlx::Error> {
+    let accounts = sqlx::query_as!(
+        Account,
+        r#"
+        SELECT
+            app.id,
+            app.api_id AS "api_id?",
+            app.api_hash AS "api_hash?",
+            acc.phone,
+            acc.session,
+            acc.role AS "role: AccountRole"
+        FROM accounts AS acc
+        LEFT JOIN telegram_apps AS app ON acc.app_id = app.id
+        WHERE acc.status = 'active'
+            AND acc.role = 'viewer'
+            AND NOT (acc.id = ANY($1))
+        ORDER BY acc.created_at DESC
+        "#,
+        existing_ids
+    ).fetch_all(pg_pool).await?;
+    Ok(accounts)
+}
+
 pub async fn deactivate_account_by_id(pg_pool: &PgPool, id: i32, status: AccountStatus)
     -> Result<(), sqlx::Error> {
     sqlx::query!(

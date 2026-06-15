@@ -2,11 +2,16 @@ use std::sync::Arc;
 use ferogram::{Button, Client, InlineKeyboard, InputMessage, OverflowStrategy, ReplyKeyboard, Update};
 use ferogram::tl::enums::{Message, Peer};
 use sqlx::{PgPool};
+use crate::accounts::pool::AccountPool;
 use crate::config::AppConfig;
 use crate::floors::cache::Cache;
 use crate::floors::client::run;
 
-pub async fn init_bot(pg_pool: &PgPool, cache: Arc<Cache>, config: &AppConfig) -> anyhow::Result<()> {
+pub async fn init_bot(pg_pool: &PgPool,
+                      cache: Arc<Cache>,
+                      acc_pool: Arc<AccountPool>,
+                      config: &AppConfig)
+    -> anyhow::Result<()> {
     let (bot, _) = Client::builder()
         .api_id(config.default_api_id)
         .api_hash(&config.default_api_hash)

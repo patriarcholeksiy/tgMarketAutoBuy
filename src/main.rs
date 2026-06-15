@@ -30,29 +30,35 @@ async fn main() -> Result<()> {
         .connect(&config.database_url)
         .await?;
 
-    migrate!("./migrations").run(&pool).await.context("Failed to run migraions")?;
+    migrate!("./migrations").run(&pool).await.context("Failed to run migrations")?;
 
     let cache = Arc::new(Cache::init(&pool).await.context("Failed to init cache")?);
 
-    let bot_pool = pool.clone();
+    let (acc_pool, new_viewer_rx)
+        = AccountPool::init(&pool, &config)
+        .await
+        .context("Failed init account pool")?;
+
+    let acc_pool = Arc::new(acc_pool);
+
+    let bot_pg_pool = pool.clone();
     let bot_cache = Arc::clone(&cache);
+    let bot_acc_pool = Arc::clone(&acc_pool);
     let bot_config = Arc::clone(&config);
     let mut bot_handle = tokio::spawn(async move {
-        if let Err(e) = init_bot(&bot_pool, bot_cache, &bot_config).await {
+        if let Err(e) = init_bot(&bot_pg_pool, bot_cache, bot_acc_pool, &bot_config).await {
             tracing::error!("Bot admin error: {e:#}");
             return Err(e);
         }
         Ok::<(), anyhow::Error>(())
     });
 
-    let acc_pool = AccountPool::init(&pool, &config).await.context("Failed init account pool")?;
-
     let requests = build_targets_with_combos(&pool)
         .await
         .context("Failed to build targets")?;
 
     let mut sniper_handle = tokio::spawn(async move {
-        start_runner(acc_pool, cache, requests, config, pool).await;
+        start_runner(&acc_pool, new_viewer_rx, cache, requests, config, pool).await;
     });
 
     tokio::select! {
