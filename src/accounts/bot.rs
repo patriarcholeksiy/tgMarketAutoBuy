@@ -15,6 +15,7 @@ pub async fn init_bot(pg_pool: &PgPool,
     let (bot, _) = Client::builder()
         .api_id(config.default_api_id)
         .api_hash(&config.default_api_hash)
+        .session_string("")
         .update_queue_capacity(10)
         .update_overflow_strategy(OverflowStrategy::DropOldest)
         .connect().await?;

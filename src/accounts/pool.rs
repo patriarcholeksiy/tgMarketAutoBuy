@@ -5,7 +5,7 @@ use ferogram::tl::enums::contacts::ResolvedPeer;
 use ferogram::tl::enums::{InputPeer, User};
 use ferogram::tl::functions::contacts::ResolveUsername;
 use ferogram::tl::types::InputPeerUser;
-use ferogram::{BuilderError, Client, InvocationError, OverflowStrategy};
+use ferogram::{BuilderError, Client, InvocationError, OverflowStrategy, StringSessionBackend};
 use sqlx::PgPool;
 use std::sync::Arc;
 use std::time::Duration;
@@ -36,7 +36,6 @@ impl AccountPool {
         let mut buyers = Vec::new();
         let mut viewers = Vec::new();
         for account in accounts {
-            tracing::info!("Start of client auth {} with phone: {:?}", account.id, account.phone);
             let client = match Self::connect_client(&account, config).await {
                 Ok(client) => client,
                 Err(e) if matches!(account.role, AccountRole::Buyer) => {
@@ -51,7 +50,8 @@ impl AccountPool {
                         tracing::error!("CRITICAL: Client {} received fatal error {}: {}", account.id, rpc_err.code, rpc_err.name);
                         AccountPool::deactivate_account(pg_pool, account.id, rpc_err.code).await;
                     } else {
-                        tracing::warn!("RPC error during invocation {}: {}", rpc_err.code, rpc_err.name);
+                        tracing::warn!("RPC error during invocation {}: {} for client {} with phone: {:?}",
+                            rpc_err.code, rpc_err.name, account.id, account.phone);
                     }
                     continue;
                 }
@@ -65,11 +65,11 @@ impl AccountPool {
                     let input_peer = Self::generate_input_peer(&client, config)
                         .await
                         .context("Failed generate input peer")?;
-                    tracing::info!("Buyer client {:?} logged in", account.phone);
+                    tracing::info!("Buyer client {} with phone {:?} logged in", account.id, account.phone);
                     buyers.push((client, input_peer))
                 },
                 AccountRole::Viewer => {
-                    tracing::info!("Viewer client {:?} logged in", account.phone);
+                    tracing::info!("Viewer client {} with phone {:?} logged in", account.id, account.phone);
                     viewers.push((client, account.id, account.phone)) }
             }
             tokio::time::sleep(Duration::from_millis(65)).await;
@@ -82,7 +82,7 @@ impl AccountPool {
             bail!("Critical error: No viewers initialized!");
         }
 
-        tracing::info!("Buyers count - {}\nViewers count - {}", buyers.len(), viewers.len());
+        tracing::info!("Buyers count - {}, Viewers count - {}", buyers.len(), viewers.len());
 
         let (tx, rx) = mpsc::unbounded_channel();
 

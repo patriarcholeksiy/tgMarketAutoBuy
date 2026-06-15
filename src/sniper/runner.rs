@@ -136,7 +136,10 @@ fn spawn_viewer_task(
                     match err {
                         e if e.flood_wait_seconds().is_some() => {
                             let seconds = e.flood_wait_seconds().unwrap();
-                            tracing::warn!("Client get flood wait to {seconds} seconds");
+                            tracing::warn!(
+                                "Client {} with phone: {:?} get flood wait to {seconds} seconds",
+                                account_id, phone
+                            );
                             tokio::time::sleep(Duration::from_secs(seconds + 2)).await;
                             continue
                         }
@@ -149,11 +152,17 @@ fn spawn_viewer_task(
                             break
                         }
                         InvocationError::Rpc(rpc_err) => {
-                            tracing::warn!("RPC error during invocation {}: {}", rpc_err.code, rpc_err.name);
+                            tracing::warn!(
+                                "RPC error during invocation {}: {} for viewer {} with phone: {:?}",
+                                rpc_err.code, rpc_err.name, account_id, phone
+                            );
                             continue
                         }
                         _ => {
-                            tracing::warn!("Cannot invoke request, err - {err:?}");
+                            tracing::warn!(
+                                "Cannot invoke request for viewer {} with phone: {:?}, err - {err:?}",
+                                account_id, phone
+                            );
                             continue
                         }
                     }
@@ -165,7 +174,7 @@ fn spawn_viewer_task(
             let first_gift = match resale_star_gifts.gifts.into_iter().next() {
                 Some(gift) => gift,
                 None => {
-                    tracing::warn!("First gift is None");
+                    tracing::warn!("First gift is None for viewers {account_id} with phone: {phone:?}");
                     continue
                 }
             };
@@ -180,7 +189,7 @@ fn spawn_viewer_task(
                 *map.get(&(parsed.sticker_id, parsed.backdrop_id as u16))
                     .unwrap_or(&default_fallback_price)
             };
-
+            println!("{}: floor: {}, parsed_price: {}", parsed.slug, floor_price, parsed.price_in_stars);
             if SniperStrategy::should_buy(floor_price, parsed.price_in_stars, num, den) {
                 tracing::info!("Find gift {} with price {}", parsed.slug, parsed.price_in_stars);
 

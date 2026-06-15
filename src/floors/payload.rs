@@ -68,10 +68,7 @@ impl PortalsItem {
                     None
                 }
             }
-        } else {
-            tracing::warn!("item doesn't have '{}' no price (None)", self.name);
-            None
-        }
+        } else { None }
     }
 }
 

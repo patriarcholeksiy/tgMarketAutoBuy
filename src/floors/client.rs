@@ -154,7 +154,6 @@ async fn update_floor_prices(pool: &PgPool, config: &AppConfig) -> Result<()> {
     let mut backdrops_to_update = Vec::new();
 
     for collection in collections {
-        tracing::info!("Update floor for {} collection", collection.title);
         let collection_portals
             = portal_response.collections.get(&collection.short_title);
         let x_gift_data
