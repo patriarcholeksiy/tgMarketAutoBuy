@@ -1,7 +1,9 @@
 use std::sync::Arc;
+use std::time::Duration;
 use ferogram::{Button, Client, InlineKeyboard, InputMessage, OverflowStrategy, ReplyKeyboard, Update};
 use ferogram::tl::enums::{Message, Peer};
 use sqlx::{PgPool};
+use tokio::sync::mpsc::UnboundedReceiver;
 use crate::accounts::pool::{AccountPool, ViewerData};
 use crate::config::AppConfig;
 use crate::floors::cache::Cache;
@@ -10,7 +12,8 @@ use crate::floors::client::run;
 pub async fn init_bot(pg_pool: &PgPool,
                       cache: Arc<Cache>,
                       acc_pool: Arc<AccountPool>,
-                      config: Arc<AppConfig>)
+                      config: Arc<AppConfig>,
+                      mut notify_rx: UnboundedReceiver<String>)
     -> anyhow::Result<()> {
     let (bot, _) = Client::builder()
         .api_id(config.default_api_id)
@@ -21,6 +24,20 @@ pub async fn init_bot(pg_pool: &PgPool,
         .connect().await?;
 
     bot.bot_sign_in(&*config.bot_token).await?;
+    tracing::info!("Admin bot sign in");
+
+    let alert_bot = bot.clone();
+    let admin_id = config.admin_user_id;
+
+    tokio::spawn(async move {
+        tracing::info!("Alert worker for admin bot started");
+        while let Some(message_text) = notify_rx.recv().await {
+            if let Err(e) = alert_bot.send_message(admin_id, message_text).await {
+                tracing::warn!("Failed to send alert message: {e:?}");
+            }
+            tokio::time::sleep(Duration::from_secs(1)).await;
+        }
+    });
 
     let mut waiting_for_proxy = false;
 

@@ -10,7 +10,7 @@ use ferogram::tl::functions;
 use ferogram::tl::functions::payments::GetResaleStarGifts;
 use ferogram::tl::types::{InputInvoiceStarGiftResale};
 use sqlx::PgPool;
-use tokio::sync::mpsc::UnboundedReceiver;
+use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
 use tokio::task::{JoinSet};
 use crate::accounts::pool::{AccountPool, ViewerData};
 use crate::accounts::telegram::ParsedGift;
@@ -26,6 +26,7 @@ pub struct Context {
     pub config: Arc<AppConfig>,
     pub counter: Arc<AtomicUsize>,
     pub pg_pool: PgPool,
+    pub notify_tx: UnboundedSender<String>,
 }
 
 pub async fn start_runner(acc_pool: &AccountPool,
@@ -33,7 +34,8 @@ pub async fn start_runner(acc_pool: &AccountPool,
                           cache: Arc<Cache>,
                           requests: Arc<[Arc<[GetResaleStarGifts]>]>,
                           config: Arc<AppConfig>,
-                          pg_pool: PgPool) {
+                          pg_pool: PgPool,
+                          notify_tx: UnboundedSender<String>) {
 
     let counter = Arc::new(AtomicUsize::new(0));
     let requests_len = requests.len();
@@ -55,6 +57,7 @@ pub async fn start_runner(acc_pool: &AccountPool,
         config,
         counter,
         pg_pool,
+        notify_tx,
     };
 
     for (i, viewer_data) in current_viewers.iter().enumerate() {
@@ -148,7 +151,7 @@ fn spawn_viewer_task(
                                     "CRITICAL: Client {account_id} with phone {phone:?} received fatal error {}: {}. Stopping task...",
                                     rpc_err.code, rpc_err.name
                                 );
-                            AccountPool::deactivate_account(&context.pg_pool, account_id, rpc_err.code).await;
+                            AccountPool::deactivate_account(&context.pg_pool, account_id, phone, rpc_err.code, &context.notify_tx).await;
                             break
                         }
                         InvocationError::Rpc(rpc_err) => {

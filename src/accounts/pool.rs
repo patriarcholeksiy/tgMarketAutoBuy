@@ -5,12 +5,12 @@ use ferogram::tl::enums::contacts::ResolvedPeer;
 use ferogram::tl::enums::{InputPeer, User};
 use ferogram::tl::functions::contacts::ResolveUsername;
 use ferogram::tl::types::InputPeerUser;
-use ferogram::{BuilderError, Client, InvocationError, OverflowStrategy, StringSessionBackend};
+use ferogram::{BuilderError, Client, InvocationError, NoRetries, OverflowStrategy, StringSessionBackend};
 use sqlx::PgPool;
 use std::sync::Arc;
 use std::time::Duration;
 use arc_swap::ArcSwap;
-use tokio::sync::mpsc;
+use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 
 #[derive(Default)]
 pub struct AddViewersReport {
@@ -23,12 +23,13 @@ pub type ViewerData = (Client, i32, Option<String>);
 pub struct AccountPool {
     pub buyers: Arc<[(Client, InputPeer)]>,
     pub viewers: ArcSwap<Vec<ViewerData>>,
-    pub new_viewers_tx: mpsc::UnboundedSender<ViewerData>
+    pub new_viewers_tx: UnboundedSender<ViewerData>,
+    pub notify_tx: UnboundedSender<String>,
 }
 
 impl AccountPool {
-    pub async fn init(pg_pool: &PgPool, config: &AppConfig)
-        -> Result<(Self, mpsc::UnboundedReceiver<ViewerData>)> {
+    pub async fn init(pg_pool: &PgPool, config: &AppConfig, notify_tx: UnboundedSender<String>)
+        -> Result<(Self, UnboundedReceiver<ViewerData>)> {
         let accounts = get_active_accounts(pg_pool)
             .await
             .context("Failed to get active accounts from DB")?;
@@ -48,7 +49,7 @@ impl AccountPool {
                 Err(BuilderError::Connect(InvocationError::Rpc(rpc_err))) => {
                     if rpc_err.code == 401 || rpc_err.name == "FROZEN_METHOD_INVALID" {
                         tracing::error!("CRITICAL: Client {} received fatal error {}: {}", account.id, rpc_err.code, rpc_err.name);
-                        AccountPool::deactivate_account(pg_pool, account.id, rpc_err.code).await;
+                        AccountPool::deactivate_account(pg_pool, account.id, account.phone, rpc_err.code, &notify_tx).await;
                     } else {
                         tracing::warn!("RPC error during invocation {}: {} for client {} with phone: {:?}",
                             rpc_err.code, rpc_err.name, account.id, account.phone);
@@ -84,15 +85,16 @@ impl AccountPool {
 
         tracing::info!("Buyers count - {}, Viewers count - {}", buyers.len(), viewers.len());
 
-        let (tx, rx) = mpsc::unbounded_channel();
+        let (new_viewers_tx, new_viewers_rx) = unbounded_channel();
 
         let acc_pool = AccountPool {
             buyers: Arc::from(buyers),
             viewers: ArcSwap::from_pointee(viewers),
-            new_viewers_tx: tx
+            new_viewers_tx,
+            notify_tx,
         };
 
-        Ok((acc_pool, rx))
+        Ok((acc_pool, new_viewers_rx))
     }
 
     async fn connect_client(account: &Account, config: &AppConfig) -> Result<Client, BuilderError> {
@@ -102,6 +104,7 @@ impl AccountPool {
             .update_queue_capacity(0)
             .session_string(account.session.clone())
             .update_overflow_strategy(OverflowStrategy::DropNewest)
+            .retry_policy(Arc::new(NoRetries))
             .connect().await?;
         Ok(client)
     }
@@ -151,7 +154,7 @@ impl AccountPool {
                 Err(BuilderError::Connect(InvocationError::Rpc(rpc_err))) => {
                     if rpc_err.code == 401 || rpc_err.name == "FROZEN_METHOD_INVALID" {
                         tracing::error!("CRITICAL: Client {} received fatal error {}: {}", account.id, rpc_err.code, rpc_err.name);
-                        AccountPool::deactivate_account(pg_pool, account.id, rpc_err.code).await;
+                        AccountPool::deactivate_account(pg_pool, account.id, account.phone.clone(), rpc_err.code, &self.notify_tx).await;
 
                         report.failed.push((account.id, account.phone, format!("Banned/Frozen (Code: {})", rpc_err.code)));
                     } else {
@@ -176,7 +179,7 @@ impl AccountPool {
             });
 
             if let Err(e) = self.new_viewers_tx.send(new_viewer_data) {
-                bail!("MPSC channel closed");
+                bail!("MPSC channel closed with error: {e:?}");
             }
 
             report.added.push((account.id, account.phone));
@@ -185,14 +188,22 @@ impl AccountPool {
         Ok(report)
     }
 
-    pub async fn deactivate_account(pg_pool: &PgPool, id: i32, err_code: i32) {
+    pub async fn deactivate_account(pg_pool: &PgPool,
+                                    id: i32,
+                                    phone: Option<String>,
+                                    err_code: i32,
+                                    notify_tx: &UnboundedSender<String>) {
         let status = match err_code { 
             401 => AccountStatus::Unauthorized,
             _ => AccountStatus::Frozen
         };
         if let Err(e) = deactivate_account_by_id(pg_pool, id, status).await {
-            tracing::warn!("Failed to deactivate account {id} in DB: {e:?}")
+            tracing::warn!("Failed to deactivate account {id} in DB: {e:?}");
         }
-        tracing::info!("Client {id} was deactivated with err_code {err_code}")
+        tracing::info!("Client {id} with {phone:?} was deactivated with err_code {err_code}");
+
+        if let Err(e) = notify_tx.send(format!("Client {id} with {phone:?} was deactivated with err_code {err_code}")) {
+            tracing::warn!("Channel alert is closed, alert doesn't sent: {e:?}");
+        }
     }
 }

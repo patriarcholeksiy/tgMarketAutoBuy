@@ -13,6 +13,7 @@ use anyhow::{Context, Result};
 use sqlx::migrate;
 use sqlx::postgres::PgPoolOptions;
 use std::sync::Arc;
+use tokio::sync::mpsc;
 use tracing_appender::rolling::{Builder, Rotation};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
@@ -34,8 +35,10 @@ async fn main() -> Result<()> {
 
     let cache = Arc::new(Cache::init(&pool).await.context("Failed to init cache")?);
 
+    let (notify_tx, notify_rx) = mpsc::unbounded_channel::<String>();
+
     let (acc_pool, new_viewer_rx)
-        = AccountPool::init(&pool, &config)
+        = AccountPool::init(&pool, &config, notify_tx.clone())
         .await
         .context("Failed init account pool")?;
 
@@ -46,7 +49,13 @@ async fn main() -> Result<()> {
     let bot_acc_pool = Arc::clone(&acc_pool);
     let bot_config = Arc::clone(&config);
     let mut bot_handle = tokio::spawn(async move {
-        if let Err(e) = init_bot(&bot_pg_pool, bot_cache, bot_acc_pool, bot_config).await {
+        if let Err(e) = init_bot(
+            &bot_pg_pool,
+            bot_cache,
+            bot_acc_pool,
+            bot_config,
+            notify_rx
+        ).await {
             tracing::error!("Bot admin error: {e:#}");
             return Err(e);
         }
@@ -57,8 +66,9 @@ async fn main() -> Result<()> {
         .await
         .context("Failed to build targets")?;
 
+
     let mut sniper_handle = tokio::spawn(async move {
-        start_runner(&acc_pool, new_viewer_rx, cache, requests, config, pool).await;
+        start_runner(&acc_pool, new_viewer_rx, cache, requests, config, pool, notify_tx.clone()).await;
     });
 
     tokio::select! {
