@@ -2,7 +2,7 @@ use std::sync::Arc;
 use ferogram::{Button, Client, InlineKeyboard, InputMessage, OverflowStrategy, ReplyKeyboard, Update};
 use ferogram::tl::enums::{Message, Peer};
 use sqlx::{PgPool};
-use crate::accounts::pool::AccountPool;
+use crate::accounts::pool::{AccountPool, ViewerData};
 use crate::config::AppConfig;
 use crate::floors::cache::Cache;
 use crate::floors::client::run;
@@ -130,8 +130,21 @@ pub async fn init_bot(pg_pool: &PgPool,
                         tracing::info!("Received a callback to update the floors");
 
                         let pool_clone = pg_pool.clone();
-                        let cache_clone = Arc::clone(&cache);
                         let config_clone = Arc::clone(&config);
+                        let viewer_clone = {
+                            let viewers = acc_pool.viewers.load();
+                            match viewers.last() {
+                                Some(viewer_data) => viewer_data.0.clone(),
+                                None => {
+                                    if let Err(e) = cb.answer().text("Err: empty viewers").send(&bot).await {
+                                        tracing::warn!("Failed to answer callback empty viewers - {e:?}");
+                                    }
+                                    continue
+                                }
+                            }
+                        };
+
+                        let cache_clone = Arc::clone(&cache);
 
                         if let Err(e) = cb.answer().text("Updating floors...").send(&bot).await {
                             tracing::warn!("Failed to answer callback floor:update - {e:?}")
@@ -140,7 +153,7 @@ pub async fn init_bot(pg_pool: &PgPool,
                         let bot_clone = bot.clone();
                         tokio::spawn(async move {
                             let admin_id = config_clone.admin_user_id;
-                            match run(&pool_clone, &config_clone).await {
+                            match run(&pool_clone, config_clone, viewer_clone).await {
                                 Ok(_) => {
                                     if let Err(e) = bot_clone.send_message(admin_id, "Update floors ended").await {
                                         tracing::warn!("Failed to send message about floors update ended - {e:?}")

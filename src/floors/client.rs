@@ -5,33 +5,25 @@ use anyhow::{Context, Result, bail};
 use ferogram::tl::enums::payments::{StarGiftUpgradeAttributes, StarGifts};
 use ferogram::tl::enums::{Document, StarGift, StarGiftAttribute};
 use ferogram::tl::functions;
-use ferogram::OverflowStrategy;
 use sqlx::PgPool;
 use std::collections::HashSet;
+use std::sync::Arc;
 use std::time::Duration;
 use wreq::{Client, Proxy};
 use wreq_util::Emulation;
 use crate::config::AppConfig;
 
-pub async fn run(pool: &PgPool, config: &AppConfig) -> Result<()> {
-    sync_telegram_collections(pool, config).await.context("Failed to sync telegram collections")?;
+pub async fn run(pool: &PgPool, config: Arc<AppConfig>, viewer: ferogram::Client) -> Result<()> {
+    sync_telegram_collections(pool, &config, viewer).await.context("Failed to sync telegram collections")?;
     tracing::info!("Sync collections end");
 
-    update_floor_prices(pool, config).await.context("Failed to update floor prices")?;
+    update_floor_prices(pool, &config).await.context("Failed to update floor prices")?;
     tracing::info!("Update end!");
 
     Ok(())
 }
 
-async fn sync_telegram_collections(pool: &PgPool, config: &AppConfig) -> Result<()> {
-    let (viewer, _) = ferogram::Client::builder()
-        .api_id(config.default_api_id)
-        .api_hash(&config.default_api_hash)
-        .update_queue_capacity(0)
-        .session_string(&config.default_session_string)
-        .update_overflow_strategy(OverflowStrategy::DropNewest)
-        .connect().await?;
-    tracing::info!("The Telegram client is authorized");
+async fn sync_telegram_collections(pool: &PgPool, config: &AppConfig, viewer: ferogram::Client) -> Result<()> {
 
     let collections = viewer.invoke(&functions::payments::GetStarGifts {
         hash: 0,
