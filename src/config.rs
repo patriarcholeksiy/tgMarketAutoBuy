@@ -25,7 +25,9 @@ pub struct AppConfig {
     pub bot_token: String,
     pub admin_user_id: i64,
 
+    #[serde(default = "default_portals_username")]
     pub portals_username: String,
+    #[serde(default = "default_portals_id")]
     pub portals_id: i64,
 
     // default var for auth tg client
