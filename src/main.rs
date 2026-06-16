@@ -68,7 +68,7 @@ async fn main() -> Result<()> {
 
 
     let mut sniper_handle = tokio::spawn(async move {
-        start_runner(&acc_pool, new_viewer_rx, cache, requests, config, pool, notify_tx.clone()).await;
+        start_runner(acc_pool, new_viewer_rx, cache, requests, config, pool, notify_tx.clone()).await;
     });
 
     tokio::select! {

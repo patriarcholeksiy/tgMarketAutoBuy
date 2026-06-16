@@ -49,7 +49,7 @@ impl AccountPool {
                 Err(BuilderError::Connect(InvocationError::Rpc(rpc_err))) => {
                     if rpc_err.code == 401 || rpc_err.name == "FROZEN_METHOD_INVALID" {
                         tracing::error!("CRITICAL: Client {} received fatal error {}: {}", account.id, rpc_err.code, rpc_err.name);
-                        AccountPool::deactivate_account(pg_pool, account.id, account.phone, rpc_err.code, &notify_tx).await;
+                        deactivate_account_from_db_and_send_alert(pg_pool, account.id, &account.phone, rpc_err.code, &notify_tx).await;
                     } else {
                         tracing::warn!("RPC error during invocation {}: {} for client {} with phone: {:?}",
                             rpc_err.code, rpc_err.name, account.id, account.phone);
@@ -154,7 +154,7 @@ impl AccountPool {
                 Err(BuilderError::Connect(InvocationError::Rpc(rpc_err))) => {
                     if rpc_err.code == 401 || rpc_err.name == "FROZEN_METHOD_INVALID" {
                         tracing::error!("CRITICAL: Client {} received fatal error {}: {}", account.id, rpc_err.code, rpc_err.name);
-                        AccountPool::deactivate_account(pg_pool, account.id, account.phone.clone(), rpc_err.code, &self.notify_tx).await;
+                        deactivate_account_from_db_and_send_alert(pg_pool, account.id, &account.phone, rpc_err.code, &self.notify_tx).await;
 
                         report.failed.push((account.id, account.phone, format!("Banned/Frozen (Code: {})", rpc_err.code)));
                     } else {
@@ -188,22 +188,41 @@ impl AccountPool {
         Ok(report)
     }
 
-    pub async fn deactivate_account(pg_pool: &PgPool,
+    pub async fn deactivate_account(&self,
+                                    pg_pool: &PgPool,
                                     id: i32,
                                     phone: Option<String>,
-                                    err_code: i32,
-                                    notify_tx: &UnboundedSender<String>) {
-        let status = match err_code { 
-            401 => AccountStatus::Unauthorized,
-            _ => AccountStatus::Frozen
-        };
-        if let Err(e) = deactivate_account_by_id(pg_pool, id, status).await {
-            tracing::warn!("Failed to deactivate account {id} in DB: {e:?}");
-        }
+                                    err_code: i32) {
+        deactivate_account_from_db_and_send_alert(pg_pool,
+                                                  id,
+                                                  &phone,
+                                                  err_code,
+                                                  &self.notify_tx).await;
         tracing::info!("Client {id} with {phone:?} was deactivated with err_code {err_code}");
 
-        if let Err(e) = notify_tx.send(format!("Client {id} with {phone:?} was deactivated with err_code {err_code}")) {
-            tracing::warn!("Channel alert is closed, alert doesn't sent: {e:?}");
-        }
+        self.viewers.rcu(|current_vec| {
+            let mut next_vec = (**current_vec).clone();
+            next_vec.retain(|(_, viewer_id, _)| *viewer_id != id);
+            next_vec
+        });
+
+    }
+}
+
+async fn deactivate_account_from_db_and_send_alert(pg_pool: &PgPool,
+                                                   id: i32,
+                                                   phone: &Option<String>,
+                                                   err_code: i32,
+                                                   notify_tx: &UnboundedSender<String>) {
+    let status = match err_code {
+        401 => AccountStatus::Unauthorized,
+        _ => AccountStatus::Frozen
+    };
+    if let Err(e) = deactivate_account_by_id(pg_pool, id, status).await {
+        tracing::warn!("Failed to deactivate account {id} in DB: {e:?}");
+    }
+
+    if let Err(e) = notify_tx.send(format!("Client {id} with {phone:?} was deactivated with err_code {err_code}")) {
+        tracing::warn!("Channel alert is closed, alert doesn't sent: {e:?}");
     }
 }

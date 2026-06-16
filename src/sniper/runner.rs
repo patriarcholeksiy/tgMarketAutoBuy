@@ -20,7 +20,7 @@ use crate::sniper::strategy::SniperStrategy;
 
 #[derive(Clone)]
 pub struct Context {
-    pub buyers: Arc<[(Client, InputPeer)]>,
+    pub acc_pool: Arc<AccountPool>,
     pub cache: Arc<Cache>,
     pub requests: Arc<[Arc<[GetResaleStarGifts]>]>,
     pub config: Arc<AppConfig>,
@@ -29,7 +29,7 @@ pub struct Context {
     pub notify_tx: UnboundedSender<String>,
 }
 
-pub async fn start_runner(acc_pool: &AccountPool,
+pub async fn start_runner(acc_pool: Arc<AccountPool>,
                           mut new_viewer_rx: UnboundedReceiver<ViewerData>,
                           cache: Arc<Cache>,
                           requests: Arc<[Arc<[GetResaleStarGifts]>]>,
@@ -51,7 +51,7 @@ pub async fn start_runner(acc_pool: &AccountPool,
     let default_fallback_price = ((125 * num) / den) as i32;
 
     let context = Context {
-        buyers: Arc::clone(&acc_pool.buyers),
+        acc_pool,
         cache,
         requests,
         config,
@@ -151,7 +151,7 @@ fn spawn_viewer_task(
                                     "CRITICAL: Client {account_id} with phone {phone:?} received fatal error {}: {}. Stopping task...",
                                     rpc_err.code, rpc_err.name
                                 );
-                            AccountPool::deactivate_account(&context.pg_pool, account_id, phone, rpc_err.code, &context.notify_tx).await;
+                            context.acc_pool.deactivate_account(&context.pg_pool, account_id, phone, rpc_err.code).await;
                             break
                         }
                         InvocationError::Rpc(rpc_err) => {
@@ -197,7 +197,7 @@ fn spawn_viewer_task(
                 tracing::info!("Find gift {} with price {}", parsed.slug, parsed.price_in_stars);
 
                 let price_in_ton = parsed.price_in_ton;
-                let buyers_clone = Arc::clone(&context.buyers);
+                let buyers_clone = Arc::clone(&context.acc_pool.buyers);
 
                 tokio::spawn(async move {
                     let mut set = JoinSet::new();
