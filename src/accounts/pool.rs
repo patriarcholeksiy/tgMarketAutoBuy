@@ -105,6 +105,10 @@ impl AccountPool {
             .session_string(account.session.clone())
             .update_overflow_strategy(OverflowStrategy::DropNewest)
             .retry_policy(Arc::new(NoRetries))
+            .system_lang_code("en")
+            .device_model("Android")
+            .app_version("3.4.5")
+            .system_version("16")
             .connect().await?;
         Ok(client)
     }
