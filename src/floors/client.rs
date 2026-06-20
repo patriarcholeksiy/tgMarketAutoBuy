@@ -1,6 +1,6 @@
 use crate::floors::models::{Backdrop, Collection, Model};
 use crate::floors::db::{bulk_update_backdrops, bulk_update_models, fetch_all_collections, fetch_all_tg_ids, fetch_collections_without_models, get_all_backdrops_item, get_all_models_item, save_new_backdrops, save_new_collections, save_new_models, PriceUpdateBackdrop, PriceUpdateModel};
-use crate::floors::payload::{BybitResponse, PortalsResponse, PortalsResponseMap, XGiftItem, XGiftResponse, XGiftResponseMap};
+use crate::floors::payload::{BybitResponse, PortalsResponse, PortalsResponseMap, TonApiResponse, XGiftItem, XGiftResponse, XGiftResponseMap};
 use anyhow::{Context, Result, bail};
 use ferogram::tl::enums::payments::{StarGiftUpgradeAttributes, StarGifts};
 use ferogram::tl::enums::{Document, StarGift, StarGiftAttribute};
@@ -143,7 +143,7 @@ async fn update_floor_prices(pool: &PgPool, config: &AppConfig) -> Result<()> {
         .join(",");
     let portal_response = get_portals_collections(&client, short_titles).await.context("Failed to get portals collections")?;
 
-    let ton_price_in_dollars = get_ton_price(&client).await.context("Failed to get TON price")?;
+    let ton_price_in_dollars = get_gram_price(&client).await.context("Failed to get TON price")?;
     // just multiplay on floor_in_ton (0.015 - price per star)
     let stars_rate = ton_price_in_dollars / config.star_price_per_dollar;
 
@@ -315,17 +315,34 @@ async fn get_x_gift_collection(client: &Client, short_title: &str)
     bail!("Can't get response from xGift for {short_title}")
 }
 
-async fn get_ton_price(client: &Client) -> Result<f32> {
-    let url = "https://api.bybit.com/v5/market/tickers?category=spot&symbol=TONUSDT";
+async fn get_gram_price(client: &Client) -> Result<f32> {
+    get_gram_price_from_ton_api(client).await
+}
 
+async fn get_gram_price_from_ton_api(client: &Client) -> Result<f32> {
+    let url = "https://tonapi.io/v2/rates?tokens=gram&currencies=usd";
     if let Ok(response) = client.get(url).send().await {
-        if let Ok(data) = response.json::<BybitResponse>().await {
-            if let Some(ticker) = data.result.list.first() {
-                if let Ok(price) = ticker.last_price.parse::<f32>() {
-                    return Ok(price)
-                }
+        if let Ok(data) = response.json::<TonApiResponse>().await {
+            if let Some(gram_data) = data.rates.get("GRAM") {
+                let price_usd = gram_data.prices.usd;
+
+                let diff_24h_val = parse_diff_string(&gram_data.diff_24h.usd);
+                let diff_7d_val = parse_diff_string(&gram_data.diff_7d.usd);
+
+                let avg_diff = (diff_7d_val + diff_24h_val) / 2.0;
+
+                let final_price = price_usd - (price_usd * (avg_diff / 100.0));
+                return Ok(final_price)
             }
         }
     }
-    bail!("Can't get ton price")
+    bail!("Can't get GRAM price from TonApi")
+}
+
+fn parse_diff_string(diff_str: &str) -> f32 {
+    diff_str
+        .trim_end_matches('%')
+        .replace('−', "-")
+        .parse::<f32>()
+        .unwrap_or(0.0)
 }

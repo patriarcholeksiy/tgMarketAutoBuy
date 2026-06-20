@@ -131,3 +131,28 @@ pub struct BybitResult {
 pub struct BybitTicker {
     pub last_price: String
 }
+
+
+#[derive(Deserialize, Debug)]
+pub struct TonApiResponse {
+    pub rates: HashMap<String, TokenData>,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct TokenData {
+    pub prices: Prices,
+    pub diff_24h: Diff,
+    pub diff_7d: Diff,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct Prices {
+    #[serde(rename = "USD")]
+    pub usd: f32,
+}
+
+#[derive(Deserialize, Debug)]
+pub struct Diff {
+    #[serde(rename = "USD")]
+    pub usd: String,
+}
