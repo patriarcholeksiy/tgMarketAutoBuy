@@ -146,7 +146,8 @@ fn spawn_viewer_task(
                             tokio::time::sleep(Duration::from_secs(seconds + 2)).await;
                             continue
                         }
-                        InvocationError::Rpc(rpc_err) if rpc_err.code == 401 || rpc_err.name == "FROZEN_METHOD_INVALID" => {
+                        InvocationError::Rpc(rpc_err)
+                        if rpc_err.code == 401 || rpc_err.name == "FROZEN_METHOD_INVALID" || rpc_err.name == "AUTH_KEY_DUPLICATED" => {
                             tracing::error!(
                                     "CRITICAL: Client {account_id} with phone {phone:?} received fatal error {}: {}. Stopping task...",
                                     rpc_err.code, rpc_err.name

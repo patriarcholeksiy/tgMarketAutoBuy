@@ -299,7 +299,7 @@ async fn deactivate_account_from_db_and_send_alert(pg_pool: &PgPool,
                                                    err_code: i32,
                                                    notify_tx: &UnboundedSender<String>) {
     let status = match err_code {
-        401 => AccountStatus::Unauthorized,
+        401 | 406 => AccountStatus::Unauthorized,
         _ => AccountStatus::Frozen
     };
     if let Err(e) = deactivate_account_by_id(pg_pool, id, status).await {
