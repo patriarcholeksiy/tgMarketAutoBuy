@@ -207,11 +207,19 @@ impl AccountPool {
                                                   &self.notify_tx).await;
         tracing::info!("Client {id} with {phone:?} was deactivated with err_code {err_code}");
 
-        self.viewers.rcu(|current_vec| {
-            let mut next_vec = (**current_vec).clone();
-            next_vec.retain(|(_, viewer_id, _)| *viewer_id != id);
-            next_vec
-        });
+        let target_client = self.viewers.load()
+            .iter()
+            .find(|(_, viewer_id, _)| *viewer_id == id)
+            .map(|(client, _, _)| client.clone());
+
+        if let Some(client) = target_client {
+            self.viewers.rcu(|current_vec| {
+                let mut next_vec = (**current_vec).clone();
+                next_vec.retain(|(_, viewer_id, _)| *viewer_id != id);
+                next_vec
+            });
+            client.disconnect();
+        }
 
     }
 
