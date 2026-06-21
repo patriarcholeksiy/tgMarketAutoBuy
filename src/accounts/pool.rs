@@ -1,3 +1,5 @@
+use std::fmt::Write;
+use std::fmt::format;
 use crate::accounts::db::{deactivate_account_by_id, get_active_accounts, get_new_active_viewers, Account, AccountRole, AccountStatus};
 use crate::config::AppConfig;
 use anyhow::{bail, Context, Result};
@@ -10,10 +12,11 @@ use sqlx::PgPool;
 use std::sync::Arc;
 use std::time::Duration;
 use arc_swap::ArcSwap;
+use ferogram::tl::functions::account::UpdateStatus;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 
 #[derive(Default)]
-pub struct AddViewersReport {
+pub struct ViewersReport {
     pub added: Vec<(i32, Option<String>)>, // id, phone
     pub failed: Vec<(i32, Option<String>, String)>, // id, phone, err
 }
@@ -131,7 +134,7 @@ impl AccountPool {
     }
 
     pub async fn add_viewers_dynamic(&self, pg_pool: &PgPool, config: &AppConfig)
-        -> Result<AddViewersReport> {
+        -> Result<ViewersReport> {
         let active_in_memory_ids = self.viewers.load()
             .iter()
             .map(|v| v.1)
@@ -141,7 +144,7 @@ impl AccountPool {
             .await
             .context("Failed to fetch dynamically added viewers from DB")?;
 
-        let mut report = AddViewersReport::default();
+        let mut report = ViewersReport::default();
 
         if new_accounts.is_empty() { return Ok(report) }
 
@@ -210,6 +213,83 @@ impl AccountPool {
             next_vec
         });
 
+    }
+
+    pub async fn ping_update_status(&self) {
+        let set_online_status = UpdateStatus { offline: false };
+        let set_offline_status = UpdateStatus { offline: true };
+
+        let mut report = ViewersReport::default();
+
+        let viewers_copy = (**self.viewers.load()).clone();
+        for (viewer, id, phone) in viewers_copy {
+            if let Err(e) = viewer.invoke(&set_online_status).await {
+                report.failed.push(
+                    (id, phone, format!("Err when set online: {e:?}"))
+                );
+                continue;
+            };
+            tokio::time::sleep(Duration::from_millis(1000)).await;
+
+            for attempt in 1..=2 {
+                match viewer.invoke(&set_offline_status).await {
+                    Ok(_) => break,
+                    Err(e) => {
+                        if attempt == 2 {
+                            report.failed.push(
+                                (id, phone.clone(), format!("Err when set offline: {e:?}"))
+                            );
+                            tracing::warn!("Error set offline for viewer: {phone:?}");
+                        } else {
+                            tokio::time::sleep(Duration::from_millis(500)).await;
+                        }
+                    }
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(1000)).await;
+        }
+
+        let mut msg = String::from("Update status finished");
+
+        if !report.failed.is_empty() {
+            let _ = writeln!(msg, "\n❌ Update status error for viewers: {}", report.failed.len());
+            for (id, phone, reason) in report.failed {
+                let _ = writeln!(msg, "ID {id} with phone {phone:?}: {reason}");
+            }
+        }
+
+        let mut buyers_msg = String::new();
+        for (buyer, _) in self.buyers.iter() {
+            if let Err(e) = buyer.invoke(&set_online_status).await {
+                let _ = writeln!(buyers_msg, "Error set online for buyer: {e:?}");
+                tracing::warn!("Error set online for buyer: {e:?}");
+                continue;
+            }
+            tokio::time::sleep(Duration::from_millis(1000)).await;
+            for attempt in 1..=2 {
+                match buyer.invoke(&set_offline_status).await {
+                    Ok(_) => break,
+                    Err(e) => {
+                        if attempt == 2 {
+                            let _ = writeln!(buyers_msg, "Error set offline for buyer: {e:?}");
+                            tracing::warn!("Error set offline for buyer: {e:?}");
+                        } else {
+                            tokio::time::sleep(Duration::from_millis(500)).await;
+                        }
+                    }
+                }
+            }
+            tokio::time::sleep(Duration::from_millis(1000)).await;
+        }
+
+        if !buyers_msg.is_empty() {
+            let _ = writeln!(msg, "\n❌ Update status error for buyers");
+            let _ = writeln!(msg, "{buyers_msg}");
+        }
+
+        if let Err(e) = self.notify_tx.send(msg) {
+            tracing::error!("Error when send msg by notify_tx: {e:?}");
+        };
     }
 }
 

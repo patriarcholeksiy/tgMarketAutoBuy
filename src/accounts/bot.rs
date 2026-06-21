@@ -91,6 +91,9 @@ pub async fn init_bot(pg_pool: &PgPool,
                         let inline_kb = InlineKeyboard::new()
                             .row([
                                 Button::callback("Add new viewers", b"accounts:add_new_viewers"),
+                            ])
+                            .row([
+                                Button::callback("Ping update status", b"accounts:ping_update_status")
                             ]);
 
                         if let Err(e) = bot.send_message(sender_id, InputMessage::text("choose").reply_markup(inline_kb)).await {
@@ -250,6 +253,17 @@ pub async fn init_bot(pg_pool: &PgPool,
                                     };
                                 }
                             }
+                        });
+                    }
+                    "accounts:ping_update_status" => {
+                        let acc_pool_clone = Arc::clone(&acc_pool);
+
+                        if let Err(e) = cb.answer().text("Ping update for all accounts...").send(&bot).await {
+                            tracing::warn!("Failed to send cb for accounts:ping_update_status: {e:?}")
+                        }
+
+                        tokio::spawn(async move {
+                            acc_pool_clone.ping_update_status().await;
                         });
                     }
                     _ => {  }

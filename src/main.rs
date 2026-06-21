@@ -13,6 +13,7 @@ use anyhow::{Context, Result};
 use sqlx::migrate;
 use sqlx::postgres::PgPoolOptions;
 use std::sync::Arc;
+use std::time::Duration;
 use tokio::sync::mpsc;
 use tracing_appender::rolling::{Builder, Rotation};
 use tracing_subscriber::layer::SubscriberExt;
@@ -43,6 +44,22 @@ async fn main() -> Result<()> {
         .context("Failed init account pool")?;
 
     let acc_pool = Arc::new(acc_pool);
+
+    let ping_acc_pool = Arc::clone(&acc_pool);
+    tokio::spawn(async move {
+        // every 3 days
+        let mut interval = tokio::time::interval(Duration::from_hours(24 * 3));
+        interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Burst);
+
+        // process first loop after 3 days start
+        interval.tick().await;
+
+        loop {
+            interval.tick().await;
+            tracing::info!("Start ping update status");
+            ping_acc_pool.ping_update_status().await;
+        }
+    });
 
     let bot_pg_pool = pool.clone();
     let bot_cache = Arc::clone(&cache);
