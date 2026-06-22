@@ -7,6 +7,7 @@ where D: Deserializer<'de> {
     s.parse::<f32>().map_err(serde::de::Error::custom)
 }
 
+#[allow(dead_code)]
 #[derive(Deserialize, Debug)]
 #[serde(rename_all = "camelCase")]
 pub struct XGiftItem {
@@ -83,6 +84,7 @@ pub struct PortalsResponse {
     pub collections: HashMap<String, CollectionPortals>
 }
 
+#[allow(dead_code)]
 #[derive(Deserialize, Debug)]
 pub struct CollectionPortalsMap {
     pub models: HashMap<String, f32>,
@@ -115,23 +117,6 @@ impl PortalsResponse {
         PortalsResponseMap { collections: map_collections }
     }
 }
-
-#[derive(Deserialize, Debug)]
-pub struct BybitResponse {
-    pub result: BybitResult
-}
-
-#[derive(Deserialize, Debug)]
-pub struct BybitResult {
-    pub list: Vec<BybitTicker>
-}
-
-#[derive(Deserialize, Debug)]
-#[serde(rename_all = "camelCase")]
-pub struct BybitTicker {
-    pub last_price: String
-}
-
 
 #[derive(Deserialize, Debug)]
 pub struct TonApiResponse {

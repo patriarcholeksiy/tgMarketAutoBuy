@@ -1,18 +1,17 @@
-use std::fmt::Write;
-use std::fmt::format;
 use crate::accounts::db::{deactivate_account_by_id, get_active_accounts, get_new_active_viewers, Account, AccountRole, AccountStatus};
 use crate::config::AppConfig;
 use anyhow::{bail, Context, Result};
+use arc_swap::ArcSwap;
 use ferogram::tl::enums::contacts::ResolvedPeer;
 use ferogram::tl::enums::{InputPeer, User};
+use ferogram::tl::functions::account::UpdateStatus;
 use ferogram::tl::functions::contacts::ResolveUsername;
 use ferogram::tl::types::InputPeerUser;
-use ferogram::{BuilderError, Client, InvocationError, NoRetries, OverflowStrategy, StringSessionBackend};
+use ferogram::{BuilderError, Client, InvocationError, NoRetries, OverflowStrategy};
 use sqlx::PgPool;
+use std::fmt::Write;
 use std::sync::Arc;
 use std::time::Duration;
-use arc_swap::ArcSwap;
-use ferogram::tl::functions::account::UpdateStatus;
 use tokio::sync::mpsc::{unbounded_channel, UnboundedReceiver, UnboundedSender};
 
 #[derive(Default)]
@@ -21,7 +20,12 @@ pub struct ViewersReport {
     pub failed: Vec<(i32, Option<String>, String)>, // id, phone, err
 }
 
-pub type ViewerData = (Client, i32, Option<String>);
+#[derive(Clone)]
+pub struct ViewerData { 
+    pub client: Client,
+    pub id: i32,
+    pub phone: Option<String>,
+}
 
 pub struct AccountPool {
     pub buyers: Arc<[(Client, InputPeer)]>,
@@ -74,7 +78,8 @@ impl AccountPool {
                 },
                 AccountRole::Viewer => {
                     tracing::info!("Viewer client {} with phone {:?} logged in", account.id, account.phone);
-                    viewers.push((client, account.id, account.phone)) }
+                    viewers.push(ViewerData { client, id: account.id, phone: account.phone }) 
+                }
             }
             tokio::time::sleep(Duration::from_millis(65)).await;
         }
@@ -137,7 +142,7 @@ impl AccountPool {
         -> Result<ViewersReport> {
         let active_in_memory_ids = self.viewers.load()
             .iter()
-            .map(|v| v.1)
+            .map(|v| v.id)
             .collect::<Vec<_>>();
 
         let new_accounts = get_new_active_viewers(pg_pool, &active_in_memory_ids)
@@ -177,7 +182,7 @@ impl AccountPool {
                 }
             };
 
-            let new_viewer_data: ViewerData = (client, account.id, account.phone.clone());
+            let new_viewer_data: ViewerData = ViewerData { client, id: account.id, phone: account.phone.clone() };
 
             self.viewers.rcu(|current_vec| {
                 let mut next_vec = (**current_vec).clone();
@@ -209,13 +214,13 @@ impl AccountPool {
 
         let target_client = self.viewers.load()
             .iter()
-            .find(|(_, viewer_id, _)| *viewer_id == id)
-            .map(|(client, _, _)| client.clone());
+            .find(|v| v.id == id)
+            .map(|v| v.client.clone());
 
         if let Some(client) = target_client {
             self.viewers.rcu(|current_vec| {
                 let mut next_vec = (**current_vec).clone();
-                next_vec.retain(|(_, viewer_id, _)| *viewer_id != id);
+                next_vec.retain(|v| v.id != id);
                 next_vec
             });
             client.disconnect();
@@ -230,10 +235,11 @@ impl AccountPool {
         let mut report = ViewersReport::default();
 
         let viewers_copy = (**self.viewers.load()).clone();
-        for (viewer, id, phone) in viewers_copy {
+        for viewer_data in viewers_copy {
+            let viewer = viewer_data.client;
             if let Err(e) = viewer.invoke(&set_online_status).await {
                 report.failed.push(
-                    (id, phone, format!("Err when set online: {e:?}"))
+                    (viewer_data.id, viewer_data.phone, format!("Err when set online: {e:?}"))
                 );
                 continue;
             };
@@ -245,9 +251,10 @@ impl AccountPool {
                     Err(e) => {
                         if attempt == 2 {
                             report.failed.push(
-                                (id, phone.clone(), format!("Err when set offline: {e:?}"))
+                                (viewer_data.id, viewer_data.phone.clone(),
+                                 format!("Err when set offline: {e:?}"))
                             );
-                            tracing::warn!("Error set offline for viewer: {phone:?}");
+                            tracing::warn!("Error set offline for viewer: {:?}", viewer_data.phone);
                         } else {
                             tokio::time::sleep(Duration::from_millis(500)).await;
                         }

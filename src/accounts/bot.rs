@@ -1,13 +1,13 @@
-use std::sync::Arc;
-use std::time::Duration;
-use ferogram::{Button, Client, InlineKeyboard, InputMessage, OverflowStrategy, ReplyKeyboard, Update};
-use ferogram::tl::enums::{Message, Peer};
-use sqlx::{PgPool};
-use tokio::sync::mpsc::UnboundedReceiver;
-use crate::accounts::pool::{AccountPool, ViewerData};
+use crate::accounts::pool::AccountPool;
 use crate::config::AppConfig;
 use crate::floors::cache::Cache;
 use crate::floors::client::run;
+use ferogram::tl::enums::{Message, Peer};
+use ferogram::{Button, Client, InlineKeyboard, InputMessage, OverflowStrategy, ReplyKeyboard, Update};
+use sqlx::PgPool;
+use std::sync::Arc;
+use std::time::Duration;
+use tokio::sync::mpsc::UnboundedReceiver;
 
 pub async fn init_bot(pg_pool: &PgPool,
                       cache: Arc<Cache>,
@@ -155,7 +155,7 @@ pub async fn init_bot(pg_pool: &PgPool,
                         let viewer_clone = {
                             let viewers = acc_pool.viewers.load();
                             match viewers.last() {
-                                Some(viewer_data) => viewer_data.0.clone(),
+                                Some(viewer_data) => viewer_data.client.clone(),
                                 None => {
                                     if let Err(e) = cb.answer().text("Err: empty viewers").send(&bot).await {
                                         tracing::warn!("Failed to answer callback empty viewers - {e:?}");

@@ -1,7 +1,8 @@
-use crate::floors::models::{Backdrop, Collection, Model};
+use crate::config::AppConfig;
 use crate::floors::db::{bulk_update_backdrops, bulk_update_models, fetch_all_collections, fetch_all_tg_ids, fetch_collections_without_models, get_all_backdrops_item, get_all_models_item, save_new_backdrops, save_new_collections, save_new_models, PriceUpdateBackdrop, PriceUpdateModel};
-use crate::floors::payload::{BybitResponse, PortalsResponse, PortalsResponseMap, TonApiResponse, XGiftItem, XGiftResponse, XGiftResponseMap};
-use anyhow::{Context, Result, bail};
+use crate::floors::models::{Backdrop, Collection, Model};
+use crate::floors::payload::{PortalsResponse, PortalsResponseMap, TonApiResponse, XGiftItem, XGiftResponse, XGiftResponseMap};
+use anyhow::{bail, Context, Result};
 use ferogram::tl::enums::payments::{StarGiftUpgradeAttributes, StarGifts};
 use ferogram::tl::enums::{Document, StarGift, StarGiftAttribute};
 use ferogram::tl::functions;
@@ -11,7 +12,6 @@ use std::sync::Arc;
 use std::time::Duration;
 use wreq::{Client, Proxy};
 use wreq_util::Emulation;
-use crate::config::AppConfig;
 
 pub async fn run(pool: &PgPool, config: Arc<AppConfig>, viewer: ferogram::Client) -> Result<()> {
     sync_telegram_collections(pool, &config, viewer).await.context("Failed to sync telegram collections")?;

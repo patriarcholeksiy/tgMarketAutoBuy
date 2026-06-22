@@ -1,8 +1,8 @@
-use std::sync::Arc;
-use arc_swap::ArcSwap;
-use rustc_hash::{FxHashMap};
-use sqlx::PgPool;
 use crate::floors::db::get_all_floor_active_collections;
+use arc_swap::ArcSwap;
+use rustc_hash::FxHashMap;
+use sqlx::PgPool;
+use std::sync::Arc;
 
 pub struct Cache {
     pub floor_prices: ArcSwap<FxHashMap<(i64, u16), i32>>

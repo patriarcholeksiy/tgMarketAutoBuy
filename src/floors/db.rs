@@ -1,14 +1,12 @@
-use std::collections::{HashMap, HashSet};
-use rustc_hash::{FxHashMap};
-use sqlx::{PgPool, QueryBuilder};
 use crate::floors::models::{Backdrop, Collection, Model};
+use rustc_hash::FxHashMap;
+use sqlx::{PgPool, QueryBuilder};
+use std::collections::{HashMap, HashSet};
 
 
 #[derive(Debug)]
 pub struct ModelItem {
     pub id: i32,
-    pub collection_short_title: String,
-    pub name: String,
     pub floor_price: i32
 }
 
@@ -20,8 +18,6 @@ pub struct PriceUpdateModel {
 #[derive(Debug)]
 pub struct BackdropItem {
     pub id: i32,
-    pub collection_short_title: String,
-    pub name: String,
     pub floor_price: i32
 }
 
@@ -55,13 +51,6 @@ pub async fn fetch_all_tg_ids(pool: &PgPool) -> Result<HashSet<i64>, sqlx::Error
         "SELECT tg_id FROM collections"
     ).fetch_all(pool).await?;
     Ok(collection_tg_ids.into_iter().collect::<HashSet<_>>())
-}
-
-pub async fn fetch_all_short_titles(pool: &PgPool) -> Result<Vec<String>, sqlx::Error> {
-    let short_titles = sqlx::query_scalar!(
-        "SELECT short_title FROM collections"
-    ).fetch_all(pool).await?;
-    Ok(short_titles)
 }
 
 pub async fn save_new_collections(pool: &PgPool, new_collections: Vec<Collection>)
@@ -146,11 +135,9 @@ pub async fn get_all_models_item(pool: &PgPool)
 
     let map = records.into_iter()
         .map(|r| {
-            let key = (r.collection_short_title.clone(), r.name.clone());
+            let key = (r.collection_short_title, r.name);
             let item = ModelItem {
                 id: r.id,
-                collection_short_title: r.collection_short_title,
-                name: r.name,
                 floor_price: r.floor_price
             };
             (key, item)
@@ -176,11 +163,9 @@ pub async fn get_all_backdrops_item(pool: &PgPool)
 
     let map = records.into_iter()
         .map(|r| {
-            let key = (r.collection_short_title.clone(), r.name.clone());
+            let key = (r.collection_short_title, r.name);
             let item = BackdropItem {
                 id: r.id,
-                collection_short_title: r.collection_short_title,
-                name: r.name,
                 floor_price: r.floor_price
             };
             (key, item)

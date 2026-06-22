@@ -1,22 +1,22 @@
-use std::f64::consts::GOLDEN_RATIO;
-use std::sync::Arc;
-use std::sync::atomic::{AtomicUsize, Ordering};
-use std::time::{Duration, Instant};
-use ferogram::{Client, InvocationError};
-use ferogram::tl::enums::{InputPeer, LabeledPrice};
-use ferogram::tl::enums::Invoice::Invoice;
-use ferogram::tl::enums::payments::{PaymentForm, ResaleStarGifts};
-use ferogram::tl::functions;
-use ferogram::tl::functions::payments::GetResaleStarGifts;
-use ferogram::tl::types::{InputInvoiceStarGiftResale};
-use sqlx::PgPool;
-use tokio::sync::mpsc::{UnboundedReceiver, UnboundedSender};
-use tokio::task::{JoinSet};
 use crate::accounts::pool::{AccountPool, ViewerData};
 use crate::accounts::telegram::ParsedGift;
 use crate::config::AppConfig;
 use crate::floors::cache::Cache;
 use crate::sniper::strategy::SniperStrategy;
+use ferogram::tl::enums::payments::{PaymentForm, ResaleStarGifts};
+use ferogram::tl::enums::Invoice::Invoice;
+use ferogram::tl::enums::LabeledPrice;
+use ferogram::tl::functions;
+use ferogram::tl::functions::payments::GetResaleStarGifts;
+use ferogram::tl::types::InputInvoiceStarGiftResale;
+use ferogram::InvocationError;
+use sqlx::PgPool;
+use std::f64::consts::GOLDEN_RATIO;
+use std::sync::atomic::{AtomicUsize, Ordering};
+use std::sync::Arc;
+use std::time::{Duration, Instant};
+use tokio::sync::mpsc::UnboundedReceiver;
+use tokio::task::JoinSet;
 
 #[derive(Clone)]
 pub struct Context {
@@ -26,7 +26,6 @@ pub struct Context {
     pub config: Arc<AppConfig>,
     pub counter: Arc<AtomicUsize>,
     pub pg_pool: PgPool,
-    pub notify_tx: UnboundedSender<String>,
 }
 
 pub async fn start_runner(acc_pool: Arc<AccountPool>,
@@ -34,8 +33,7 @@ pub async fn start_runner(acc_pool: Arc<AccountPool>,
                           cache: Arc<Cache>,
                           requests: Arc<[Arc<[GetResaleStarGifts]>]>,
                           config: Arc<AppConfig>,
-                          pg_pool: PgPool,
-                          notify_tx: UnboundedSender<String>) {
+                          pg_pool: PgPool) {
 
     let counter = Arc::new(AtomicUsize::new(0));
     let requests_len = requests.len();
@@ -57,17 +55,12 @@ pub async fn start_runner(acc_pool: Arc<AccountPool>,
         config,
         counter,
         pg_pool,
-        notify_tx,
     };
 
-    for (i, viewer_data) in current_viewers.iter().enumerate() {
+    for viewer_data in current_viewers.iter() {
         let context_clone = context.clone();
 
-        let viewer = viewer_data.0.clone();
-        let account_id = viewer_data.1;
-        let phone = viewer_data.2.clone();
-
-        spawn_viewer_task((viewer, account_id, phone),
+        spawn_viewer_task(viewer_data.clone(),
                           context_clone,
                           requests_len,
                           global_start_time, Arc::clone(&spawned_count),
@@ -78,7 +71,7 @@ pub async fn start_runner(acc_pool: Arc<AccountPool>,
 
     while let Some(new_viewer_data) = new_viewer_rx.recv().await {
         let context_clone = context.clone();
-        spawn_viewer_task((new_viewer_data.0, new_viewer_data.1, new_viewer_data.2),
+        spawn_viewer_task(new_viewer_data.clone(),
                           context_clone,
                           requests_len,
                           global_start_time, Arc::clone(&spawned_count),
@@ -98,9 +91,9 @@ fn spawn_viewer_task(
     den: i64,
     default_fallback_price: i32,
 ) {
-    let viewer = viewer_data.0;
-    let account_id = viewer_data.1;
-    let phone = viewer_data.2;
+    let viewer = viewer_data.client;
+    let account_id = viewer_data.id;
+    let phone = viewer_data.phone;
 
     tokio::spawn(async move {
         let market_poll_us = context.config.market_poll_ms as u64 * 1000;

@@ -1,10 +1,10 @@
-use std::sync::Arc;
+use crate::accounts::db::get_active_collection_stickers;
+use anyhow::{Context, Result};
 use ferogram::tl::enums::StarGiftAttributeId;
 use ferogram::tl::functions::payments::GetResaleStarGifts;
 use ferogram::tl::types::StarGiftAttributeIdModel;
 use sqlx::PgPool;
-use crate::accounts::db::get_active_collection_stickers;
-use anyhow::{Context, Result};
+use std::sync::Arc;
 
 pub async fn build_targets_with_combos(pg_pool: &PgPool)
     -> Result<Arc<[Arc<[GetResaleStarGifts]>]>> {
