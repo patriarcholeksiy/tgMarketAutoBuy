@@ -3,6 +3,10 @@ name = "tg_market_autobuy"
 version = "0.1.0"
 edition = "2024"
 
+[profile.release]
+lto = true
+codegen-units = 1
+
 [dependencies]
 anyhow = "1.0.102"
 dotenvy = "0.15.7"
@@ -19,3 +23,4 @@ tracing-appender = "0.2"
 arc-swap = "1.9.1"
 rustc-hash = "2.1.2"
 envy = "0.4.2"
+mimalloc = "0.1.52"

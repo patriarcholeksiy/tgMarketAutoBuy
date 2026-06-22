@@ -10,6 +10,7 @@ use crate::config::AppConfig;
 use crate::floors::cache::Cache;
 use crate::sniper::start_runner;
 use anyhow::{Context, Result};
+use mimalloc::MiMalloc;
 use sqlx::migrate;
 use sqlx::postgres::PgPoolOptions;
 use std::sync::Arc;
@@ -19,6 +20,9 @@ use tracing_appender::rolling::{Builder, Rotation};
 use tracing_subscriber::layer::SubscriberExt;
 use tracing_subscriber::util::SubscriberInitExt;
 use tracing_subscriber::{fmt, EnvFilter};
+
+#[global_allocator]
+static GLOBAL: MiMalloc = MiMalloc;
 
 #[tokio::main]
 async fn main() -> Result<()> {

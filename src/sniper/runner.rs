@@ -171,7 +171,10 @@ fn spawn_viewer_task(
             let first_gift = match resale_star_gifts.gifts.into_iter().next() {
                 Some(gift) => gift,
                 None => {
-                    tracing::warn!("First gift is None for viewers {account_id} with phone: {phone:?}");
+                    tracing::warn!(
+                        "First gift {} is None for viewers {account_id} with phone: {phone:?}",
+                        gift_combos[combo_index].gift_id
+                    );
                     continue
                 }
             };
@@ -186,7 +189,7 @@ fn spawn_viewer_task(
                 *map.get(&(parsed.sticker_id, parsed.backdrop_id as u16))
                     .unwrap_or(&default_fallback_price)
             };
-            println!("{}: floor: {}, parsed_price: {}", parsed.slug, floor_price, parsed.price_in_stars);
+
             if SniperStrategy::should_buy(floor_price, parsed.price_in_stars, num, den) {
                 tracing::info!("Find gift {} with price {}", parsed.slug, parsed.price_in_stars);
 
