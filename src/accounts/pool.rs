@@ -21,7 +21,7 @@ pub struct ViewersReport {
 }
 
 #[derive(Clone)]
-pub struct ViewerData { 
+pub struct ViewerData {
     pub client: Client,
     pub id: i32,
     pub phone: Option<String>,
@@ -54,7 +54,7 @@ impl AccountPool {
                     break;
                 }
                 Err(BuilderError::Connect(InvocationError::Rpc(rpc_err))) => {
-                    if rpc_err.code == 401 || rpc_err.name == "FROZEN_METHOD_INVALID" {
+                    if rpc_err.code == 401 || rpc_err.name == "FROZEN_METHOD_INVALID" || rpc_err.name == "AUTH_KEY_DUPLICATED" {
                         tracing::error!("CRITICAL: Client {} received fatal error {}: {}", account.id, rpc_err.code, rpc_err.name);
                         deactivate_account_from_db_and_send_alert(pg_pool, account.id, &account.phone, rpc_err.code, &notify_tx).await;
                     } else {
@@ -78,7 +78,7 @@ impl AccountPool {
                 },
                 AccountRole::Viewer => {
                     tracing::info!("Viewer client {} with phone {:?} logged in", account.id, account.phone);
-                    viewers.push(ViewerData { client, id: account.id, phone: account.phone }) 
+                    viewers.push(ViewerData { client, id: account.id, phone: account.phone })
                 }
             }
             tokio::time::sleep(Duration::from_millis(65)).await;
@@ -153,6 +153,8 @@ impl AccountPool {
 
         if new_accounts.is_empty() { return Ok(report) }
 
+        let mut new_viewers_data = Vec::with_capacity(new_accounts.len());
+
         for account in new_accounts {
             tracing::info!("Start of new client auth {} with phone: {:?}", account.id, account.phone);
 
@@ -164,7 +166,7 @@ impl AccountPool {
                     continue;
                 }
                 Err(BuilderError::Connect(InvocationError::Rpc(rpc_err))) => {
-                    if rpc_err.code == 401 || rpc_err.name == "FROZEN_METHOD_INVALID" {
+                    if rpc_err.code == 401 || rpc_err.name == "FROZEN_METHOD_INVALID" || rpc_err.name == "AUTH_KEY_DUPLICATED" {
                         tracing::error!("CRITICAL: Client {} received fatal error {}: {}", account.id, rpc_err.code, rpc_err.name);
                         deactivate_account_from_db_and_send_alert(pg_pool, account.id, &account.phone, rpc_err.code, &self.notify_tx).await;
 
@@ -182,20 +184,28 @@ impl AccountPool {
                 }
             };
 
-            let new_viewer_data: ViewerData = ViewerData { client, id: account.id, phone: account.phone.clone() };
+            let new_viewer_data = ViewerData {
+                client,
+                id: account.id,
+                phone: account.phone.clone()
+            };
 
-            self.viewers.rcu(|current_vec| {
-                let mut next_vec = (**current_vec).clone();
-                next_vec.push(new_viewer_data.clone());
-                next_vec
-            });
+            new_viewers_data.push(new_viewer_data.clone());
 
             if let Err(e) = self.new_viewers_tx.send(new_viewer_data) {
                 bail!("MPSC channel closed with error: {e:?}");
             }
+            
+            tokio::time::sleep(Duration::from_millis(1000)).await;
 
             report.added.push((account.id, account.phone));
         }
+
+        self.viewers.rcu(|current_vec| {
+            let mut next_vec = (**current_vec).clone();
+            next_vec.extend(new_viewers_data.iter().cloned());
+            next_vec
+        });
 
         Ok(report)
     }
