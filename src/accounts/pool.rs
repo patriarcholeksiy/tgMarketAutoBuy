@@ -7,7 +7,7 @@ use ferogram::tl::enums::{InputPeer, User};
 use ferogram::tl::functions::account::UpdateStatus;
 use ferogram::tl::functions::contacts::ResolveUsername;
 use ferogram::tl::types::InputPeerUser;
-use ferogram::{BuilderError, Client, InvocationError, NoRetries, OverflowStrategy};
+use ferogram::{Client, InvocationError, NoRetries, OverflowStrategy, TransportKind};
 use sqlx::PgPool;
 use std::fmt::Write;
 use std::sync::Arc;
@@ -49,11 +49,11 @@ impl AccountPool {
                 Err(e) if matches!(account.role, AccountRole::Buyer) => {
                     return Err(e).context(format!("Buyer {} account {:?} could not log in", account.id, account.phone));
                 }
-                Err(BuilderError::MissingApiId | BuilderError::MissingApiHash) => {
-                    tracing::warn!("Client {} with phone {:?} has invalid api id/hash", account.id, account.phone);
-                    break;
-                }
-                Err(BuilderError::Connect(InvocationError::Rpc(rpc_err))) => {
+                // Err(BuilderError::MissingApiId | BuilderError::MissingApiHash) => {
+                //     tracing::warn!("Client {} with phone {:?} has invalid api id/hash", account.id, account.phone);
+                //     break;
+                // }
+                Err(InvocationError::Rpc(rpc_err)) => {
                     if rpc_err.code == 401 || rpc_err.name == "FROZEN_METHOD_INVALID" || rpc_err.name == "AUTH_KEY_DUPLICATED" {
                         tracing::error!("CRITICAL: Client {} received fatal error {}: {}", account.id, rpc_err.code, rpc_err.name);
                         deactivate_account_from_db_and_send_alert(pg_pool, account.id, &account.phone, rpc_err.code, &notify_tx).await;
@@ -105,19 +105,36 @@ impl AccountPool {
         Ok((acc_pool, new_viewers_rx))
     }
 
-    async fn connect_client(account: &Account, config: &AppConfig) -> Result<Client, BuilderError> {
-        let (client, _) = Client::builder()
+    async fn connect_client(account: &Account, config: &AppConfig) -> Result<Client, InvocationError> {
+        let config_client = Client::builder()
             .api_id(account.api_id.unwrap_or(config.default_api_id))
             .api_hash(account.api_hash.clone().unwrap_or(config.default_api_hash.clone()))
             .update_queue_capacity(0)
             .session_string(account.session.clone())
             .update_overflow_strategy(OverflowStrategy::DropNewest)
             .retry_policy(Arc::new(NoRetries))
+            .transport(TransportKind::Abridged)
             .system_lang_code("en")
             .device_model("Android")
             .app_version("3.4.5")
             .system_version("16")
-            .connect().await?;
+            .build().unwrap();
+
+        let (client, _) = Client::connect(config_client).await?;
+
+        // let (client, _) = Client::builder()
+        //     .api_id(account.api_id.unwrap_or(config.default_api_id))
+        //     .api_hash(account.api_hash.clone().unwrap_or(config.default_api_hash.clone()))
+        //     .update_queue_capacity(0)
+        //     .session_string(account.session.clone())
+        //     .update_overflow_strategy(OverflowStrategy::DropNewest)
+        //     .retry_policy(Arc::new(NoRetries))
+        //     .transport(TransportKind::Abridged)
+        //     .system_lang_code("en")
+        //     .device_model("Android")
+        //     .app_version("3.4.5")
+        //     .system_version("16")
+        //     .connect().await?;
         Ok(client)
     }
 
@@ -160,12 +177,12 @@ impl AccountPool {
 
             let client = match Self::connect_client(&account, config).await {
                 Ok(client) => client,
-                Err(BuilderError::MissingApiId | BuilderError::MissingApiHash) => {
-                    tracing::warn!("Client {} with phone {:?} has invalid api id/hash", account.id, account.phone);
-                    report.failed.push((account.id, account.phone, "Invalid API ID/Hash".to_string()));
-                    continue;
-                }
-                Err(BuilderError::Connect(InvocationError::Rpc(rpc_err))) => {
+                // Err(BuilderError::MissingApiId | BuilderError::MissingApiHash) => {
+                //     tracing::warn!("Client {} with phone {:?} has invalid api id/hash", account.id, account.phone);
+                //     report.failed.push((account.id, account.phone, "Invalid API ID/Hash".to_string()));
+                //     continue;
+                // }
+                Err(InvocationError::Rpc(rpc_err)) => {
                     if rpc_err.code == 401 || rpc_err.name == "FROZEN_METHOD_INVALID" || rpc_err.name == "AUTH_KEY_DUPLICATED" {
                         tracing::error!("CRITICAL: Client {} received fatal error {}: {}", account.id, rpc_err.code, rpc_err.name);
                         deactivate_account_from_db_and_send_alert(pg_pool, account.id, &account.phone, rpc_err.code, &self.notify_tx).await;
@@ -195,7 +212,7 @@ impl AccountPool {
             if let Err(e) = self.new_viewers_tx.send(new_viewer_data) {
                 bail!("MPSC channel closed with error: {e:?}");
             }
-            
+
             tokio::time::sleep(Duration::from_millis(1000)).await;
 
             report.added.push((account.id, account.phone));

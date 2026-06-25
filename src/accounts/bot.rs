@@ -3,7 +3,7 @@ use crate::config::AppConfig;
 use crate::floors::cache::Cache;
 use crate::floors::client::run;
 use ferogram::tl::enums::{Message, Peer};
-use ferogram::{Button, Client, InlineKeyboard, InputMessage, OverflowStrategy, ReplyKeyboard, Update};
+use ferogram::{Button, Client, InlineKeyboard, InputMessage, OverflowStrategy, ReplyKeyboard, TransportKind, Update};
 use sqlx::PgPool;
 use std::sync::Arc;
 use std::time::Duration;
@@ -15,13 +15,16 @@ pub async fn init_bot(pg_pool: &PgPool,
                       config: Arc<AppConfig>,
                       mut notify_rx: UnboundedReceiver<String>)
     -> anyhow::Result<()> {
-    let (bot, _) = Client::builder()
+    let config_bot = Client::builder()
         .api_id(config.default_api_id)
         .api_hash(&config.default_api_hash)
+        .transport(TransportKind::Abridged)
         .session_string("")
         .update_queue_capacity(10)
         .update_overflow_strategy(OverflowStrategy::DropOldest)
-        .connect().await?;
+        .build()?;
+
+    let (bot, _) = Client::connect(config_bot).await?;
 
     bot.bot_sign_in(&*config.bot_token).await?;
     tracing::info!("Admin bot sign in");
