@@ -111,9 +111,9 @@ impl AccountPool {
             .retry_policy(Arc::new(NoRetries))
             .transport(TransportKind::Abridged)
             .system_lang_code("en")
-            .device_model("Android")
-            .app_version("3.4.5")
-            .system_version("16")
+            .device_model(account.device_model.as_deref().unwrap_or("Android"))
+            .system_version(account.system_version.as_deref().unwrap_or("16"))
+            .app_version(account.app_version.as_deref().unwrap_or("3.4.5"))
             .build().unwrap();
 
         let (client, _) = Client::connect(config_client).await?;

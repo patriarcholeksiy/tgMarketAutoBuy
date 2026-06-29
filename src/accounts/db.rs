@@ -23,7 +23,10 @@ pub struct Account {
     pub api_hash: Option<String>,
     pub phone: Option<String>,
     pub session: String,
-    pub role: AccountRole
+    pub role: AccountRole,
+    pub device_model: Option<String>,
+    pub system_version: Option<String>,
+    pub app_version: Option<String>,
 }
 
 pub async fn get_active_accounts(pg_pool: &PgPool) -> Result<Vec<Account>, sqlx::Error> {
@@ -36,7 +39,10 @@ pub async fn get_active_accounts(pg_pool: &PgPool) -> Result<Vec<Account>, sqlx:
             app.api_hash AS "api_hash?",
             acc.phone AS "phone?",
             acc.session,
-            acc.role AS "role: AccountRole"
+            acc.role AS "role: AccountRole",
+            acc.device_model AS "device_model?",
+            acc.system_version AS "system_version?",
+            acc.app_version AS "app_version?"
         FROM accounts AS acc
         LEFT JOIN telegram_apps AS app ON acc.app_id = app.id
         WHERE acc.status = 'active'
@@ -57,7 +63,10 @@ pub async fn get_new_active_viewers(pg_pool: &PgPool, existing_ids: &[i32])
             app.api_hash AS "api_hash?",
             acc.phone AS "phone?",
             acc.session,
-            acc.role AS "role: AccountRole"
+            acc.role AS "role: AccountRole",
+            acc.device_model AS "device_model?",
+            acc.system_version AS "system_version?",
+            acc.app_version AS "app_version?"
         FROM accounts AS acc
         LEFT JOIN telegram_apps AS app ON acc.app_id = app.id
         WHERE acc.status = 'active'
