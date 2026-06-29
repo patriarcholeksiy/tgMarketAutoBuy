@@ -12,7 +12,8 @@ pub enum AccountRole {
 pub enum AccountStatus {
     Active,
     Frozen,
-    Unauthorized
+    Unauthorized,
+    DuplicatedKey,
 }
 
 #[derive(Debug)]

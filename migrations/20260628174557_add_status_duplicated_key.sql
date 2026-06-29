@@ -1,0 +1,1 @@
+ALTER TYPE account_status ADD VALUE 'duplicated_key';
