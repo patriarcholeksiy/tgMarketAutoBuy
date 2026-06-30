@@ -8,12 +8,11 @@ use ferogram::tl::enums::{Document, StarGift, StarGiftAttribute};
 use ferogram::tl::functions;
 use sqlx::PgPool;
 use std::collections::HashSet;
-use std::sync::Arc;
 use std::time::Duration;
 use wreq::{Client, Proxy};
 use wreq_util::Emulation;
 
-pub async fn run(pool: &PgPool, config: Arc<AppConfig>, viewer: ferogram::Client) -> Result<()> {
+pub async fn run(pool: &PgPool, config: &AppConfig, viewer: ferogram::Client) -> Result<()> {
     sync_telegram_collections(pool, &config, viewer).await.context("Failed to sync telegram collections")?;
     tracing::info!("Sync collections end");
 

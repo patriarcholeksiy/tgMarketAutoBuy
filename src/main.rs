@@ -2,10 +2,11 @@ pub mod floors;
 pub mod accounts;
 pub mod sniper;
 mod config;
+mod bot;
 
-use crate::accounts::init_bot;
 use crate::accounts::pool::AccountPool;
 use crate::accounts::requests::build_targets_with_combos;
+use crate::bot::init_bot;
 use crate::config::AppConfig;
 use crate::floors::cache::Cache;
 use crate::sniper::start_runner;
