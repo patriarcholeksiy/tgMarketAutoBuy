@@ -23,6 +23,7 @@ pub struct ViewersReport {
 #[derive(Clone)]
 pub struct ViewerData {
     pub client: Client,
+    pub input_peer: Option<InputPeer>,
     pub id: i32,
     pub phone: Option<String>,
 }
@@ -69,12 +70,25 @@ impl AccountPool {
                     let input_peer = Self::generate_input_peer(&client, config)
                         .await
                         .context("Failed generate input peer")?;
+
                     tracing::info!("Buyer client {} with phone {:?} logged in", account.id, account.phone);
                     buyers.push((client, input_peer))
                 },
                 AccountRole::Viewer => {
+                    let input_peer = Self::generate_input_peer(&client, config)
+                        .await
+                        .inspect_err(|err| {
+                            tracing::warn!("Failed to generate input peer for viewer {:?}: {err:#}", account.phone)
+                        })
+                        .ok();
+
                     tracing::info!("Viewer client {} with phone {:?} logged in", account.id, account.phone);
-                    viewers.push(ViewerData { client, id: account.id, phone: account.phone })
+                    viewers.push(ViewerData {
+                        client,
+                        input_peer,
+                        id: account.id,
+                        phone: account.phone
+                    })
                 }
             }
             tokio::time::sleep(Duration::from_millis(65)).await;
@@ -183,8 +197,16 @@ impl AccountPool {
                 }
             };
 
+            let input_peer = Self::generate_input_peer(&client, config)
+                .await
+                .inspect_err(|err| {
+                    tracing::warn!("Failed to generate input peer for viewer {:?}: {err:#}", account.phone)
+                })
+                .ok();
+
             let new_viewer_data = ViewerData {
                 client,
+                input_peer,
                 id: account.id,
                 phone: account.phone.clone()
             };
