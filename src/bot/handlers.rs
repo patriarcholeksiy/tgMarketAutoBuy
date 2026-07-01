@@ -16,68 +16,51 @@ pub async fn handle_message(
     config: Arc<AppConfig>,
     waiting_proxy: &mut bool,
 ) {
-    let Message::Message(message) = message.raw else {
-        return;
-    };
+    let Message::Message(message) = message.raw else { return; };
 
     let Peer::User(user) = message.peer_id else { return };
-
     if user.user_id != config.admin_user_id {
         tracing::warn!("Access attempt from someone else's ID: {}", user.user_id);
         return;
     }
 
-    match message.message.trim() {
+    let response_msg = match message.message.trim() {
         "/start" | "start" => {
             *waiting_proxy = false;
             let reply_kb = keyboards::start_reply_keyboard();
 
-            if let Err(e) = bot.send_message(
-                config.admin_user_id, InputMessage::text("choose").reply_markup(reply_kb)
-            ).await {
-                tracing::warn!("Failed to send start start message - {e:?}")
-            };
+            InputMessage::text("choose").reply_markup(reply_kb)
         }
         "Gifts and Floors" => {
             let inline_kb = keyboards::service_floors_keyboard();
 
-            if let Err(e) = bot.send_message(
-                config.admin_user_id, InputMessage::text("choose").reply_markup(inline_kb)
-            ).await {
-                tracing::warn!("Failed to send Gifts and Floors menu message - {e:?}")
-            };
+            InputMessage::text("choose").reply_markup(inline_kb)
         }
         "Accounts" => {
             let inline_kb = keyboards::service_accounts_keyboard();
 
-            if let Err(e) = bot.send_message(
-                config.admin_user_id, InputMessage::text("choose").reply_markup(inline_kb)
-            ).await {
-                tracing::warn!("Failed to send Accounts menu message - {e:?}")
-            };
+            InputMessage::text("choose").reply_markup(inline_kb)
         }
         proxy if *waiting_proxy => {
             if let Some(formatted_proxy) = utils::format_proxy_string(proxy.trim()) {
                 config.current_wreq_proxy.store(Some(Arc::new(formatted_proxy.clone())));
                 *waiting_proxy = false;
 
-                if let Err(e) = bot.send_message(
-                    config.admin_user_id,
-                    format!("The proxy is installed and ready to work!\n\n Final view: {formatted_proxy}")
-                ).await {
-                    tracing::warn!("Failed to send message about proxy - {e:?}")
-                }
+                InputMessage::text(format!(
+                    "The proxy is installed and ready to work!\n\nFinal view: {formatted_proxy}"
+                ))
             } else {
-                if let Err(e) = bot.send_message(
-                    config.admin_user_id,
+                InputMessage::text(
                     "Invalid proxy format.\nExpected: `IP:PORT:LOGIN:PASS` or `http://...`"
-                ).await {
-                    tracing::warn!("Failed to send message about invalid proxy - {e:?}")
-                };
+                )
             }
         }
-        _ => {  }
-    }
+        _ => InputMessage::text("Unknown command")
+    };
+
+    if let Err(e) = bot.send_message(config.admin_user_id, response_msg).await {
+        tracing::warn!("Failed to send admin message: {e:?}")
+    };
 }
 
 pub async fn handle_callback(
