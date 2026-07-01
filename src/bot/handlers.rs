@@ -9,14 +9,18 @@ use ferogram::{Client, InputMessage};
 use sqlx::PgPool;
 use std::sync::Arc;
 use tokio::time::Instant;
+use crate::accounts;
 
 pub async fn handle_message(
     message: IncomingMessage,
-    bot: &Client,
+    bot: Client,
+    account_pool: Arc<AccountPool>,
+    pg_pool: PgPool,
     config: Arc<AppConfig>,
     waiting_proxy: &mut bool,
 ) {
     let Message::Message(message) = message.raw else { return; };
+    if message.out { return; }
 
     let Peer::User(user) = message.peer_id else { return };
     if user.user_id != config.admin_user_id {
@@ -28,18 +32,15 @@ pub async fn handle_message(
         "/start" | "start" => {
             *waiting_proxy = false;
             let reply_kb = keyboards::start_reply_keyboard();
-
-            InputMessage::text("choose").reply_markup(reply_kb)
+            InputMessage::text(get_stats_text(&pg_pool, &account_pool).await).reply_markup(reply_kb)
         }
         "Gifts and Floors" => {
             let inline_kb = keyboards::service_floors_keyboard();
-
-            InputMessage::text("choose").reply_markup(inline_kb)
+            InputMessage::text(get_stats_text(&pg_pool, &account_pool).await).reply_markup(inline_kb)
         }
         "Accounts" => {
             let inline_kb = keyboards::service_accounts_keyboard();
-
-            InputMessage::text("choose").reply_markup(inline_kb)
+            InputMessage::text(get_stats_text(&pg_pool, &account_pool).await).reply_markup(inline_kb)
         }
         proxy if *waiting_proxy => {
             if let Some(formatted_proxy) = utils::format_proxy_string(proxy.trim()) {
@@ -61,6 +62,13 @@ pub async fn handle_message(
     if let Err(e) = bot.send_message(config.admin_user_id, response_msg).await {
         tracing::warn!("Failed to send admin message: {e:?}")
     };
+}
+
+async fn get_stats_text(pg_pool: &PgPool, account_pool: &AccountPool) -> String {
+    let db_count = accounts::count_active_viewers(pg_pool).await.unwrap_or(0);
+    let prog_count = account_pool.viewers.load().len();
+
+    format!("Active viewers in db: {db_count}\nActive viewers in program: {prog_count}")
 }
 
 pub async fn handle_callback(

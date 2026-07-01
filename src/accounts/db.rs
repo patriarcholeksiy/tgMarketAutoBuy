@@ -88,6 +88,12 @@ pub async fn deactivate_account_by_id(pg_pool: &PgPool, id: i32, status: Account
     Ok(())
 }
 
+pub async fn count_active_viewers(pg_pool: &PgPool) -> Result<i64, sqlx::Error> {
+    sqlx::query_scalar(
+        "SELECT COUNT(*) FROM accounts WHERE status = 'active' AND role = 'viewer'"
+    ).fetch_one(pg_pool).await
+}
+
 pub struct CollectionStickers {
     pub gift_id: i64,
     pub sticker_ids: Vec<i64>

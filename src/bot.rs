@@ -49,8 +49,16 @@ pub async fn init_bot(pg_pool: &PgPool,
     let mut updates = bot.stream_updates();
     while let Some(update) = updates.next().await {
         match update {
-            Update::NewMessage(message)
-                => handlers::handle_message(message, &bot, config.clone(), &mut waiting_for_proxy).await,
+            Update::NewMessage(message) => {
+                handlers::handle_message(
+                    message,
+                    bot.clone(),
+                    acc_pool.clone(),
+                    pg_pool.clone(),
+                    config.clone(),
+                    &mut waiting_for_proxy
+                ).await;
+            }
             Update::CallbackQuery(cb) => {
                 handlers::handle_callback(
                     cb,
