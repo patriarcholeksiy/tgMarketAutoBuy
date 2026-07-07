@@ -36,11 +36,69 @@ pub async fn build_targets_with_combos(pg_pool: &PgPool)
                 combos.push(create_request(collection_sticker.gift_id, Some(attrs)));
             }
 
-            for skip1 in 0..size {
-                for skip2 in (skip1 + 1)..size {
-                    let mut attrs = Vec::with_capacity(size - 2);
+            // First pass: odd distances with even skip1 indices
+            for distance in (1..size).step_by(2) {
+                for skip1 in (0..size).step_by(2) {
+                    let skip2 = skip1 + distance;
+                    if skip2 < size {
+                        let mut attrs = Vec::with_capacity(size - 2);
+                        for (j, &id) in collection_sticker.sticker_ids.iter().enumerate() {
+                            if j != skip1 && j != skip2 { attrs.push(create_model_attr(id)); }
+                        }
+                        combos.push(create_request(collection_sticker.gift_id, Some(attrs)));
+                    }
+                }
+            }
+
+            // Second pass: even distances with all skip1 indices
+            for distance in (2..size).step_by(2) {
+                for skip1 in 0..size {
+                    let skip2 = skip1 + distance;
+                    if skip2 < size {
+                        let mut attrs = Vec::with_capacity(size - 2);
+                        for (j, &id) in collection_sticker.sticker_ids.iter().enumerate() {
+                            if j != skip1 && j != skip2 { attrs.push(create_model_attr(id)); }
+                        }
+                        combos.push(create_request(collection_sticker.gift_id, Some(attrs)));
+                    }
+                }
+            }
+
+            // Third pass: odd distances with odd skip1 indices
+            for distance in (1..size).step_by(2) {
+                for skip1 in (1..size).step_by(2) {
+                    let skip2 = skip1 + distance;
+                    if skip2 < size {
+                        let mut attrs = Vec::with_capacity(size - 2);
+                        for (j, &id) in collection_sticker.sticker_ids.iter().enumerate() {
+                            if j != skip1 && j != skip2 { attrs.push(create_model_attr(id)); }
+                        }
+                        combos.push(create_request(collection_sticker.gift_id, Some(attrs)));
+                    }
+                }
+            }
+
+            // Generate three-element combinations, sorted by sum for optimal spacing
+            if size >= 3 {
+                let mut three_combos = Vec::new();
+
+                for i in 0..size {
+                    for j in (i+1)..size {
+                        for k in (j+1)..size {
+                            three_combos.push((i, j, k));
+                        }
+                    }
+                }
+
+                // Sort by sum of indices, then by indices themselves for better spacing
+                three_combos.sort_by_key(|&(i, j, k)| (i + j + k, i, j));
+
+                for (skip1, skip2, skip3) in three_combos {
+                    let mut attrs = Vec::with_capacity(size - 3);
                     for (j, &id) in collection_sticker.sticker_ids.iter().enumerate() {
-                        if j != skip1 && j != skip2 { attrs.push(create_model_attr(id)); }
+                        if j != skip1 && j != skip2 && j != skip3 {
+                            attrs.push(create_model_attr(id));
+                        }
                     }
                     combos.push(create_request(collection_sticker.gift_id, Some(attrs)));
                 }
