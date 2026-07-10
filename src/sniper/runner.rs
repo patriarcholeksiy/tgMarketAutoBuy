@@ -12,11 +12,10 @@ use ferogram::tl::types::InputInvoiceStarGiftResale;
 use ferogram::InvocationError;
 use sqlx::PgPool;
 use std::f64::consts::GOLDEN_RATIO;
-use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
+use std::sync::atomic::{AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
 use tokio::sync::mpsc::UnboundedReceiver;
-use tokio::task::JoinSet;
 
 #[derive(Clone)]
 pub struct Context {
@@ -92,7 +91,6 @@ fn spawn_viewer_task(
     default_fallback_price: i32,
 ) {
     let viewer = viewer_data.client;
-    let viewer_input_peer = viewer_data.input_peer;
     let account_id = viewer_data.id;
     let phone = viewer_data.phone;
 
@@ -194,11 +192,27 @@ fn spawn_viewer_task(
             if SniperStrategy::should_buy(floor_price, parsed.price_in_stars, num, den) {
                 tracing::info!("Find gift {} with price {}", parsed.slug, parsed.price_in_stars);
 
+                let gift_trace_id = index;
+                tracing::info!(
+                    name = parsed.slug,
+                    gift_trace_id,
+                    account_id,
+                    phone = ?phone,
+                    gift_id = gift_combos[combo_index].gift_id,
+                    combo_index,
+                    sticker_id = parsed.sticker_id,
+                    backdrop_id = parsed.backdrop_id,
+                    price_in_stars = parsed.price_in_stars,
+                    price_in_ton = parsed.price_in_ton,
+                    floor_price,
+                    "Gift matched sniper strategy"
+                );
+
                 let price_in_ton = parsed.price_in_ton;
                 let slug = parsed.slug;
                 let buyers = Arc::clone(&context.acc_pool.buyers);
 
-                let mut form_fetchers = Vec::new();
+                let mut form_fetchers = Vec::with_capacity(61);
                 let mut precomputed_buyers = Vec::new();
 
                 for (buyer_client, buyer_peer) in buyers.iter() {
@@ -209,107 +223,85 @@ fn spawn_viewer_task(
                     };
                     let api_invoice: InputInvoice = invoice.into();
 
-                    form_fetchers.push((buyer_client.clone(), api_invoice.clone()));
+                    // form_fetchers.push((buyer_client.clone(), api_invoice.clone()));
                     precomputed_buyers.push((buyer_client.clone(), api_invoice));
                 }
 
-                if let Some(viewer_peer) = &viewer_input_peer {
-                    let invoice = InputInvoiceStarGiftResale {
-                        ton: true,
-                        slug: slug.clone(),
-                        to_id: viewer_peer.clone(),
-                    };
-                    form_fetchers.push((viewer.clone(), invoice.into()));
-                } else {
-                    tracing::warn!("Viewer {} cannot participate in payment form race", account_id);
+                for viewer_data_pool in context.acc_pool.viewers.load_full().iter().take(60) {
+                    if let Some(viewer_peer) = &viewer_data_pool.input_peer {
+                        let invoice = InputInvoiceStarGiftResale {
+                            ton: true,
+                            slug: slug.clone(),
+                            to_id: viewer_peer.clone(),
+                        };
+
+                        let form = functions::payments::GetPaymentForm {
+                            invoice: invoice.into(),
+                            theme_params: None,
+                        };
+                        form_fetchers.push((viewer_data_pool.client.clone(), form));
+                    } else {
+                        tracing::warn!("Viewer {} cannot participate in payment form race", account_id);
+                    }
                 }
 
                 tokio::spawn(async move {
-                    let (tx, mut rx) = tokio::sync::mpsc::channel(32);
-                    let is_bought = Arc::new(AtomicBool::new(false));
+                    let (tx, mut rx) = tokio::sync::mpsc::channel(80);
 
-                    for _ in 0..5 {
-                        if is_bought.load(Ordering::Relaxed) { break; }
+                    for (client, form) in form_fetchers {
+                        let client_c = client.clone();
+                        let tx_c = tx.clone();
 
-                        for (client, invoice) in &form_fetchers {
-                            let client_c = client.clone();
-                            let invoice_c = invoice.clone();
-                            let tx_c = tx.clone();
-                            let is_bought_c = is_bought.clone();
-
-                            tokio::spawn(async move {
-                                if is_bought_c.load(Ordering::Relaxed) { return; }
-
-                                let req = functions::payments::GetPaymentForm {
-                                    invoice: invoice_c,
-                                    theme_params: None,
-                                };
-
-                                if let Ok(form) = client_c.invoke(&req).await {
-                                    let _ = tx_c.try_send(form);
-                                }
-                            });
-                        }
-                        tokio::time::sleep(Duration::from_millis(5)).await;
+                        tokio::spawn(async move {
+                            if let Ok(form) = client_c.invoke(&form).await {
+                                let _ = tx_c.try_send(form);
+                            }
+                        });
                     }
                     drop(tx);
 
+                    let buyers_len = precomputed_buyers.len();
+                    let buyer_index = Arc::new(AtomicUsize::new(0));
                     while let Some(invoke_result) = rx.recv().await {
-                        if is_bought.load(Ordering::Relaxed) { break; }
 
-                        let is_bought_c = is_bought.clone();
-                        let precomputed_buyers_c = precomputed_buyers.clone();
+                        let buyer_index = buyer_index.fetch_add(1, Ordering::Relaxed);
 
-                        tokio::spawn(async move {
-                            let PaymentForm::StarGift(form_star_gift) = invoke_result else {
-                                tracing::warn!("invoke_result is not PaymentFormStarGift");
-                                return;
-                            };
-                            let Invoice(form_invoice) = form_star_gift.invoice;
+                        if let Some((buyer_client, precomputed_invoice)) = precomputed_buyers.get(buyer_index % buyers_len) {
+                            let buyer_client = buyer_client.clone();
+                            let precomputed_invoice = precomputed_invoice.clone();
 
-                            let Some(LabeledPrice::LabeledPrice(price)) = form_invoice.prices.first() else {
-                                tracing::warn!("Labeled price is empty!");
-                                return;
-                            };
+                            tokio::spawn(async move {
+                                let PaymentForm::StarGift(form_star_gift) = invoke_result else {
+                                    tracing::warn!("invoke_result is not PaymentFormStarGift");
+                                    return;
+                                };
+                                let Invoice(form_invoice) = form_star_gift.invoice;
 
-                            if price_in_ton + AppConfig::MAX_SLIPPAGE_NANO_TON < price.amount {
-                                tracing::warn!(
-                                    "Price in payment_form is changed, {} < {}, with currency {}",
-                                    price_in_ton,
-                                    price.amount,
-                                    form_invoice.currency
-                                );
-                                return;
-                            }
+                                let Some(LabeledPrice::LabeledPrice(price)) = form_invoice.prices.first() else {
+                                    tracing::warn!("Labeled price is empty!");
+                                    return;
+                                };
 
-                            let form_id = form_star_gift.form_id;
-
-                            let mut buy_set = JoinSet::new();
-                            for (buyer_client, precomputed_invoice) in precomputed_buyers_c.iter() {
-                                let buyer_client_c = buyer_client.clone();
-                                let precomputed_invoice_c = precomputed_invoice.clone();
-                                buy_set.spawn(async move {
-                                    let req = functions::payments::SendStarsForm {
-                                        form_id,
-                                        invoice: precomputed_invoice_c,
-                                    };
-                                    buyer_client_c.invoke(&req).await
-                                });
-                            }
-
-                            while let Some(res) = buy_set.join_next().await {
-                                match res {
-                                    Ok(Ok(ok)) => {
-                                        is_bought_c.store(true, Ordering::Relaxed);
-                                        tracing::info!("The gift was successfully purchased - {ok:?}");
-                                        buy_set.abort_all();
-                                        return;
-                                    }
-                                    Ok(Err(err)) => tracing::warn!("Buy failed: {:?}", err),
-                                    Err(e) => tracing::debug!("Task panic: {:?}", e),
+                                if price_in_ton + AppConfig::MAX_SLIPPAGE_NANO_TON < price.amount {
+                                    tracing::warn!(
+                                        "Price in payment_form is changed, {} < {}, with currency {}",
+                                        price_in_ton,
+                                        price.amount,
+                                        form_invoice.currency
+                                    );
+                                    return;
                                 }
-                            }
-                        });
+
+                                let req = functions::payments::SendStarsForm {
+                                    form_id: form_star_gift.form_id,
+                                    invoice: precomputed_invoice,
+                                };
+                                match buyer_client.invoke(&req).await {
+                                    Ok(result) => tracing::info!("The gift payment result - {result:#?}"),
+                                    Err(e) => tracing::warn!("Task panic: {:#?}", e),
+                                }
+                            });
+                        }
                     }
                 });
             }
