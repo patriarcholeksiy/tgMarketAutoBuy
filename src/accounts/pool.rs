@@ -115,7 +115,7 @@ impl AccountPool {
         Ok((acc_pool, new_viewers_rx))
     }
 
-    async fn connect_client(account: &Account, config: &AppConfig) -> Result<Client, InvocationError> {
+    pub async fn connect_client(account: &Account, config: &AppConfig) -> Result<Client, InvocationError> {
         let config_client = Client::builder()
             .api_id(account.api_id.unwrap_or(config.default_api_id))
             .api_hash(account.api_hash.clone().unwrap_or(config.default_api_hash.clone()))
