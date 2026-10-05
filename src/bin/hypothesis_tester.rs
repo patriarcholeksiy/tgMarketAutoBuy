@@ -251,7 +251,7 @@ async fn main() -> Result<()> {
     println!("============================================================================");
 
     let args: Vec<String> = env::args().collect();
-    let test_price: i64 = get_arg_value(&args, "--price").and_then(|s| s.parse().ok()).unwrap_or(777_777);
+    let test_price: i64 = get_arg_value(&args, "--price").and_then(|s| s.parse().ok()).unwrap_or(50_000);
     let cooldown_secs: u64 = get_arg_value(&args, "--cooldown").and_then(|s| s.parse().ok()).unwrap_or(900); // 15 min default
     let timeout_secs: u64 = get_arg_value(&args, "--timeout").and_then(|s| s.parse().ok()).unwrap_or(180);
     let poll_interval_ms: u64 = get_arg_value(&args, "--poll-ms").and_then(|s| s.parse().ok()).unwrap_or(1610);
@@ -539,19 +539,51 @@ async fn main() -> Result<()> {
         // -------------------------------------------------------------
         // STEP 2: BUYER LISTS THE GIFT
         // -------------------------------------------------------------
-        println!("[Action] Buyer listing gift '{}' for {} stars...", target_gift.slug, test_price);
-        let list_res = buyer_client.invoke(&UpdateStarGiftPrice {
-            stargift: InputSavedStarGift::Slug(InputSavedStarGiftSlug {
-                slug: target_gift.slug.clone(),
-            }),
-            resell_amount: StarsAmount::StarsAmount(StarsAmountData {
-                amount: test_price,
-                nanos: 0,
-            }),
-        }).await;
+        let mut actual_list_price = test_price;
+        let mut list_succeeded = false;
 
-        if let Err(e) = list_res {
-            eprintln!("[Error] Failed to list gift: {e:#}");
+        while actual_list_price >= 1_000 {
+            println!("[Action] Buyer listing gift '{}' for {} stars...", target_gift.slug, actual_list_price);
+            let list_res = buyer_client.invoke(&UpdateStarGiftPrice {
+                stargift: InputSavedStarGift::Slug(InputSavedStarGiftSlug {
+                    slug: target_gift.slug.clone(),
+                }),
+                resell_amount: StarsAmount::StarsAmount(StarsAmountData {
+                    amount: actual_list_price,
+                    nanos: 0,
+                }),
+            }).await;
+
+            match list_res {
+                Ok(_) => {
+                    list_succeeded = true;
+                    break;
+                }
+                Err(InvocationError::Rpc(ref rpc_err)) if rpc_err.name == "RESELL_STARS_TOO_MUCH" => {
+                    let next_price = if actual_list_price > 100_000 {
+                        100_000
+                    } else if actual_list_price > 50_000 {
+                        50_000
+                    } else if actual_list_price > 25_000 {
+                        25_000
+                    } else if actual_list_price > 10_000 {
+                        10_000
+                    } else if actual_list_price > 5_000 {
+                        5_000
+                    } else {
+                        1_000
+                    };
+                    println!("[Price Adj] {} stars exceeds Telegram's limit (RESELL_STARS_TOO_MUCH). Stepping down to {} stars...", actual_list_price, next_price);
+                    actual_list_price = next_price;
+                }
+                Err(e) => {
+                    eprintln!("[Error] Failed to list gift: {e:#}");
+                    break;
+                }
+            }
+        }
+
+        if !list_succeeded {
             eprintln!("Skipping hypothesis due to listing error.");
             continue;
         }
