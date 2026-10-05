@@ -9,7 +9,7 @@ use std::env;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tg_market_autobuy::accounts::db::{get_active_accounts, get_active_collection_stickers, Account, AccountRole};
+use tg_market_autobuy::accounts::db::{get_account_by_id, get_active_accounts, get_active_collection_stickers, Account, AccountRole};
 use tg_market_autobuy::config::AppConfig;
 use tokio::time::sleep;
 
@@ -256,6 +256,9 @@ async fn main() -> Result<()> {
     let timeout_secs: u64 = get_arg_value(&args, "--timeout").and_then(|s| s.parse().ok()).unwrap_or(180);
     let poll_interval_ms: u64 = get_arg_value(&args, "--poll-ms").and_then(|s| s.parse().ok()).unwrap_or(1610);
     let target_slug_filter = get_arg_value(&args, "--slug");
+    let requested_buyer_id: Option<i32> = get_arg_value(&args, "--buyer-id")
+        .or_else(|| get_arg_value(&args, "--buyer"))
+        .and_then(|s| s.parse().ok());
     let list_only = args.iter().any(|a| a == "--list" || a == "--list-gifts");
     let proxy_arg = get_arg_value(&args, "--proxy").or_else(|| get_arg_value(&args, "--proxy-link")).or_else(|| env::var("TG_PROXY").ok());
     let socks5_arg = get_arg_value(&args, "--socks5").or_else(|| env::var("SOCKS5_PROXY").ok());
@@ -273,15 +276,31 @@ async fn main() -> Result<()> {
         .await
         .context("Failed to connect to PostgreSQL")?;
 
-    let accounts = get_active_accounts(&pg_pool)
+    let active_accounts = get_active_accounts(&pg_pool)
         .await
         .context("Failed to fetch active accounts from DB")?;
 
-    let buyer_acc = accounts.iter().find(|a| matches!(a.role, AccountRole::Buyer))
-        .context("No active buyer account found in DB!")?;
+    println!("\nActive Accounts in DB ({}):", active_accounts.len());
+    for acc in &active_accounts {
+        println!("  • ID: {:<3} | Role: {:<7} | Phone: {:?}", acc.id, format!("{:?}", acc.role), acc.phone);
+    }
 
-    let viewer_accs: Vec<&Account> = accounts.iter()
-        .filter(|a| matches!(a.role, AccountRole::Viewer))
+    // Determine buyer account
+    let buyer_acc: Account = if let Some(buyer_id) = requested_buyer_id {
+        println!("\n[Init] Looking up specified Buyer Account ID {} in database...", buyer_id);
+        get_account_by_id(&pg_pool, buyer_id)
+            .await?
+            .with_context(|| format!("Account with ID {} was not found in DB!", buyer_id))?
+    } else {
+        let first_buyer = active_accounts.iter().find(|a| matches!(a.role, AccountRole::Buyer))
+            .context("No active buyer account found in DB! Specify one via --buyer-id <ID>")?;
+        println!("\n[Init] Auto-selected Buyer Account ID {} (Phone: {:?}). (To use a different buyer, specify --buyer-id <ID>)",
+            first_buyer.id, first_buyer.phone);
+        (*first_buyer).clone()
+    };
+
+    let viewer_accs: Vec<&Account> = active_accounts.iter()
+        .filter(|a| matches!(a.role, AccountRole::Viewer) && a.id != buyer_acc.id)
         .collect();
 
     if viewer_accs.is_empty() {
@@ -294,8 +313,8 @@ async fn main() -> Result<()> {
         println!("[Proxy] Using SOCKS5 proxy: {}", s);
     }
 
-    println!("[Init] Connecting Buyer client (Phone: {:?}, ID: {})...", buyer_acc.phone, buyer_acc.id);
-    let buyer_client = connect_account_with_proxy(buyer_acc, &config, proxy_arg.as_deref(), socks5_arg.as_deref())
+    println!("[Init] Connecting Buyer client (ID: {}, Phone: {:?})...", buyer_acc.id, buyer_acc.phone);
+    let buyer_client = connect_account_with_proxy(&buyer_acc, &config, proxy_arg.as_deref(), socks5_arg.as_deref())
         .await
         .context("Failed to connect buyer client")?;
 
@@ -317,11 +336,11 @@ async fn main() -> Result<()> {
         bail!("Failed to connect any viewer clients!");
     }
 
-    println!("[Init] Fetching buyer's owned Unique StarGifts from Telegram...");
+    println!("[Init] Fetching buyer's gifts from Telegram (Account ID {})...", buyer_acc.id);
     let saved_gifts_res = buyer_client.invoke(&GetSavedStarGifts {
         exclude_unsaved: false,
         exclude_saved: false,
-        exclude_unlimited: true,
+        exclude_unlimited: false, // Return ALL gifts (both unique and regular)
         exclude_unique: false,
         sort_by_value: false,
         exclude_upgradable: false,
@@ -335,53 +354,81 @@ async fn main() -> Result<()> {
     }).await.context("Failed to get saved star gifts for buyer")?;
 
     let SavedStarGifts::SavedStarGifts(saved_gifts) = saved_gifts_res;
-    let mut owned_gifts = Vec::new();
+    let mut owned_unique_gifts = Vec::new();
+    let mut regular_gifts_count = 0;
+
+    println!("[Init] Telegram returned {} total gifts on account ID {}:", saved_gifts.gifts.len(), buyer_acc.id);
 
     for saved_item in saved_gifts.gifts {
         let SavedStarGift::SavedStarGift(item) = saved_item;
-        if let StarGift::Unique(unique) = item.gift {
-            let mut sticker_id = None;
-            let mut currently_listed = false;
-            let mut listed_price = None;
+        match item.gift {
+            StarGift::Unique(unique) => {
+                let mut sticker_id = None;
+                let mut currently_listed = false;
+                let mut listed_price = None;
 
-            if let Some(amounts) = unique.resell_amount.as_ref() {
-                for amount in amounts {
-                    if let StarsAmount::StarsAmount(stars) = amount
-                        && stars.amount > 0 {
+                if let Some(amounts) = unique.resell_amount.as_ref() {
+                    for amount in amounts {
+                        if let StarsAmount::StarsAmount(stars) = amount
+                            && stars.amount > 0 {
                             currently_listed = true;
                             listed_price = Some(stars.amount);
                         }
+                    }
                 }
-            }
 
-            for attr in &unique.attributes {
-                if let StarGiftAttribute::Model(m) = attr
-                    && let Document::Document(doc) = &m.document {
+                for attr in &unique.attributes {
+                    if let StarGiftAttribute::Model(m) = attr
+                        && let Document::Document(doc) = &m.document {
                         sticker_id = Some(doc.id);
                     }
-            }
+                }
 
-            owned_gifts.push(TestGiftInfo {
-                slug: unique.slug,
-                title: unique.title,
-                num: unique.num,
-                gift_id: unique.gift_id,
-                sticker_id,
-                currently_listed,
-                listed_price,
-            });
+                let status = if currently_listed {
+                    format!("LISTED ({} ⭐)", listed_price.unwrap_or(0))
+                } else {
+                    "Not Listed".to_string()
+                };
+                println!("  ✓ [Unique NFT Gift] {} (#{}) | Slug: {} | Status: {}",
+                    unique.title, unique.num, unique.slug, status);
+
+                owned_unique_gifts.push(TestGiftInfo {
+                    slug: unique.slug,
+                    title: unique.title,
+                    num: unique.num,
+                    gift_id: unique.gift_id,
+                    sticker_id,
+                    currently_listed,
+                    listed_price,
+                });
+            }
+            StarGift::StarGift(reg) => {
+                regular_gifts_count += 1;
+                println!("  ℹ [Regular Gift] ID: {} | Stars: {} | (Note: regular gifts cannot be listed on market until converted/upgraded to NFT)",
+                    reg.id, reg.stars);
+            }
         }
     }
 
-    if owned_gifts.is_empty() {
-        bail!("Buyer does not own any Unique StarGifts! Transfer or buy a gift on this account first.");
+    if owned_unique_gifts.is_empty() {
+        if regular_gifts_count > 0 {
+            eprintln!("\n[Attention] Account #{} has {} Regular StarGifts, but 0 Unique (NFT) StarGifts!",
+                buyer_acc.id, regular_gifts_count);
+            eprintln!("In Telegram, only Unique StarGifts (NFTs with slug and number, e.g. 'EvilEye-1234') can be listed on the Market.");
+            eprintln!("If your gifts on account #{} are regular, you need to upgrade them to Unique in Telegram first,", buyer_acc.id);
+            eprintln!("or if your unique gifts are on another account, run with: --buyer-id <ACCOUNT_ID>");
+        } else {
+            eprintln!("\n[Error] Account #{} has NO gifts at all on Telegram!", buyer_acc.id);
+            eprintln!("Check if you intended to use a different account, and pass: --buyer-id <ACCOUNT_ID>");
+        }
+        bail!("Buyer does not own any Unique StarGifts!");
     }
 
-    println!("\nBuyer owned unique gifts ({}):", owned_gifts.len());
+    println!("\nBuyer owned unique gifts ({}) :", owned_unique_gifts.len());
     println!("{:-<80}", "");
     println!("{:<4} {:<24} {:<8} {:<20} {:<15}", "#", "Title", "Num", "Slug", "Market Status");
     println!("{:-<80}", "");
-    for (i, g) in owned_gifts.iter().enumerate() {
+    for (i, g) in owned_unique_gifts.iter().enumerate() {
         let status = if g.currently_listed {
             format!("LISTED ({} stars)", g.listed_price.unwrap_or(0))
         } else {
@@ -398,11 +445,11 @@ async fn main() -> Result<()> {
 
     // Select target gift
     let target_gift = if let Some(ref slug) = target_slug_filter {
-        owned_gifts.iter().find(|g| &g.slug == slug)
+        owned_unique_gifts.iter().find(|g| &g.slug == slug)
             .with_context(|| format!("Gift with slug '{}' not found in buyer's inventory", slug))?
             .clone()
     } else {
-        owned_gifts[0].clone()
+        owned_unique_gifts[0].clone()
     };
 
     println!("\nTarget Gift Selected for Benchmarking:");
@@ -421,7 +468,8 @@ async fn main() -> Result<()> {
     tokio::spawn(async move {
         tokio::signal::ctrl_c().await.ok();
         println!("\n[SHUTDOWN] Intercepted Ctrl+C! Checking if target gift is listed...");
-        let maybe_slug = { cleanup_slug.lock().unwrap().take() }; if let Some(slug) = maybe_slug {
+        let maybe_slug = { cleanup_slug.lock().unwrap().take() };
+        if let Some(slug) = maybe_slug {
             println!("[SHUTDOWN] Delisting gift '{}' before exit...", slug);
             let _ = delist_gift(&buyer_cleanup_cli, &slug).await;
             println!("[SHUTDOWN] Successfully delisted.");
@@ -564,21 +612,21 @@ async fn main() -> Result<()> {
                             for gift in resale.gifts {
                                 if let StarGift::Unique(unique) = gift
                                     && unique.slug == target_slug {
-                                        let elapsed = t_listed.elapsed();
-                                        det_latency.store(elapsed.as_millis() as usize, Ordering::SeqCst);
-                                        det_viewer.store(viewer_idx + 1, Ordering::SeqCst);
-                                        det_combo.store(combo_idx, Ordering::SeqCst);
-                                        is_detected.store(true, Ordering::SeqCst);
-                                        println!(
-                                            "\n>>> [TARGET FOUND!] Detected by Viewer #{} on combo #{} after {:.2}s ({} ms, request #{}) <<<",
-                                            viewer_idx + 1,
-                                            combo_idx,
-                                            elapsed.as_secs_f64(),
-                                            elapsed.as_millis(),
-                                            req_num
-                                        );
-                                        return;
-                                    }
+                                    let elapsed = t_listed.elapsed();
+                                    det_latency.store(elapsed.as_millis() as usize, Ordering::SeqCst);
+                                    det_viewer.store(viewer_idx + 1, Ordering::SeqCst);
+                                    det_combo.store(combo_idx, Ordering::SeqCst);
+                                    is_detected.store(true, Ordering::SeqCst);
+                                    println!(
+                                        "\n>>> [TARGET FOUND!] Detected by Viewer #{} on combo #{} after {:.2}s ({} ms, request #{}) <<<",
+                                        viewer_idx + 1,
+                                        combo_idx,
+                                        elapsed.as_secs_f64(),
+                                        elapsed.as_millis(),
+                                        req_num
+                                    );
+                                    return;
+                                }
                             }
                         }
                         Err(e) => {
@@ -693,7 +741,7 @@ async fn main() -> Result<()> {
         .min_by_key(|r| r.detection_latency_ms.unwrap());
 
     if let Some(w) = winner {
-        println!("\n FASTEST HYPOTHESIS: {}", w.name);
+        println!("\n🏆 FASTEST HYPOTHESIS: {}", w.name);
         println!("   Latency:        {} ms ({:.3}s)", w.detection_latency_ms.unwrap(), w.detection_latency_ms.unwrap() as f64 / 1000.0);
         println!("   Combinations:   {}", w.combos_count);
         println!("   Caught on req:  #{} (Combo #{}, Viewer #{})", w.detected_at_request, w.detected_combo_idx, w.detected_by_viewer);

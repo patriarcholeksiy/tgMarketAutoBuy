@@ -1,13 +1,13 @@
 use sqlx::PgPool;
 
-#[derive(Debug, sqlx::Type)]
+#[derive(Debug, Clone, sqlx::Type)]
 #[sqlx(type_name = "account_role", rename_all = "lowercase")]
 pub enum AccountRole {
     Viewer,
     Buyer
 }
 
-#[derive(Debug, sqlx::Type)]
+#[derive(Debug, Clone, sqlx::Type)]
 #[sqlx(type_name = "account_status", rename_all = "lowercase")]
 pub enum AccountStatus {
     Active,
@@ -16,7 +16,7 @@ pub enum AccountStatus {
     DuplicatedKey,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Account {
     pub id: i32,
     pub api_id: Option<i32>,
@@ -113,4 +113,27 @@ pub async fn get_active_collection_stickers(pg_pool: &PgPool)
     ).fetch_all(pg_pool).await?;
 
     Ok(collection_stickers)
+}
+pub async fn get_account_by_id(pg_pool: &PgPool, id: i32) -> Result<Option<Account>, sqlx::Error> {
+    let account = sqlx::query_as!(
+        Account,
+        r#"
+        SELECT
+            acc.id,
+            app.api_id AS "api_id?",
+            app.api_hash AS "api_hash?",
+            acc.phone AS "phone?",
+            acc.session,
+            acc.role AS "role: AccountRole",
+            acc.device_model AS "device_model?",
+            acc.system_version AS "system_version?",
+            acc.app_version AS "app_version?"
+        FROM accounts AS acc
+        LEFT JOIN telegram_apps AS app ON acc.app_id = app.id
+        WHERE acc.id = $1
+        "#,
+        id
+    ).fetch_optional(pg_pool).await?;
+
+    Ok(account)
 }
