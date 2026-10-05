@@ -69,7 +69,7 @@ impl AccountPool {
                 AccountRole::Buyer => {
                     let input_peer = Self::generate_input_peer(&client, config)
                         .await
-                        .context("Failed generate input peer")?;
+                        .context(format!("Failed generate input peer for account id {}", account.id))?;
 
                     tracing::info!("Buyer client {} with phone {:?} logged in", account.id, account.phone);
                     buyers.push((client, input_peer))
