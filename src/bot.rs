@@ -28,7 +28,7 @@ pub async fn init_bot(pg_pool: &PgPool,
 
     let (bot, _) = Client::connect(config_bot).await?;
 
-    bot.bot_sign_in(&*config.bot_token).await?;
+    bot.bot_sign_in(&config.bot_token).await?;
     tracing::info!("Admin bot sign in");
 
     let alert_bot = bot.clone();

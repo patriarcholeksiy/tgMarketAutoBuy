@@ -3,8 +3,6 @@ name = "tg_market_autobuy"
 version = "0.1.0"
 edition = "2024"
 
-[build]
-rustflags = ["-C", "target-cpu=znver4"]
 
 [profile.release]
 lto = true

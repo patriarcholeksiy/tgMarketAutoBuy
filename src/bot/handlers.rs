@@ -169,7 +169,7 @@ async fn update_floor_price(
     };
 
     tokio::spawn(async move {
-        match run(&pg_pool, &*config, viewer_clone).await {
+        match run(&pg_pool, &config, viewer_clone).await {
             Ok(_) => {
                 if let Err(e) = bot.send_message(
                     config.admin_user_id, format!("Update floors ended. Take: {:?}", start.elapsed())
@@ -193,7 +193,7 @@ async fn update_floor_price(
 async fn on_proxy(cb: &CallbackQuery, bot: &Client, waiting_proxy: &mut bool) {
     *waiting_proxy = true;
 
-    if let Err(e) = cb.answer().text("Send proxy to chat").send(&bot).await {
+    if let Err(e) = cb.answer().text("Send proxy to chat").send(bot).await {
         tracing::warn!("Failed to answer callback on_proxy - {e:?}")
     };
 }
@@ -202,7 +202,7 @@ async fn off_proxy(cb: &CallbackQuery, bot: &Client, config: &AppConfig, waiting
     *waiting_proxy = false;
     config.current_wreq_proxy.store(None);
 
-    if let Err(e) = cb.answer().text("Proxy for market off").send(&bot).await {
+    if let Err(e) = cb.answer().text("Proxy for market off").send(bot).await {
         tracing::warn!("Failed to answer callback off_proxy - {e:?}")
     };
 }

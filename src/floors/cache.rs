@@ -16,7 +16,7 @@ impl Cache {
     }
 
     pub async fn update(&self, pool: &PgPool) -> Result<(), sqlx::Error> {
-        match get_all_floor_active_collections(&pool).await {
+        match get_all_floor_active_collections(pool).await {
             Ok(new_map) => self.floor_prices.store(Arc::new(new_map)),
             Err(err) => return Err(err)
         }

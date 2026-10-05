@@ -248,7 +248,7 @@ pub async fn get_all_floor_active_collections(pool: &PgPool)
 
     let map: FxHashMap<(i64, u16), i32> = records.into_iter()
         .map(|r|
-            ((r.sticker_id, r.tg_backdrop_id as u16), r.max_floor_price.unwrap_or_else(|| 125))
+            ((r.sticker_id, r.tg_backdrop_id as u16), r.max_floor_price.unwrap_or(125))
         ).collect();
 
     Ok(map)

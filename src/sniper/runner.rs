@@ -35,17 +35,11 @@ pub async fn start_runner(acc_pool: Arc<AccountPool>,
                           pg_pool: PgPool) {
 
     let counter = Arc::new(AtomicUsize::new(0));
-    let requests_len = requests.len();
 
     let global_start_time = Instant::now();
     let spawned_count = Arc::new(AtomicUsize::new(0));
 
     let current_viewers = acc_pool.viewers.load();
-
-    let num = config.coeff_num;
-    let den = config.coeff_den;
-
-    let default_fallback_price = ((125 * num) / den) as i32;
 
     let context = Context {
         acc_pool,
@@ -61,38 +55,32 @@ pub async fn start_runner(acc_pool: Arc<AccountPool>,
 
         spawn_viewer_task(viewer_data.clone(),
                           context_clone,
-                          requests_len,
-                          global_start_time, Arc::clone(&spawned_count),
-                          num,
-                          den,
-                          default_fallback_price)
+                          global_start_time,
+                          Arc::clone(&spawned_count))
     }
 
     while let Some(new_viewer_data) = new_viewer_rx.recv().await {
         let context_clone = context.clone();
         spawn_viewer_task(new_viewer_data.clone(),
                           context_clone,
-                          requests_len,
-                          global_start_time, Arc::clone(&spawned_count),
-                          num,
-                          den,
-                          default_fallback_price)
+                          global_start_time,
+                          Arc::clone(&spawned_count))
     }
 }
 
 fn spawn_viewer_task(
     viewer_data: ViewerData,
     context: Context,
-    requests_len: usize,
     global_start_time: Instant,
     spawned_count: Arc<AtomicUsize>,
-    num: i64,
-    den: i64,
-    default_fallback_price: i32,
 ) {
     let viewer = viewer_data.client;
     let account_id = viewer_data.id;
     let phone = viewer_data.phone;
+    let requests_len = context.requests.len();
+    let num = context.config.coeff_num;
+    let den = context.config.coeff_den;
+    let default_fallback_price = ((125 * num) / den) as i32;
 
     tokio::spawn(async move {
         let market_poll_us = context.config.market_poll_ms as u64 * 1000;

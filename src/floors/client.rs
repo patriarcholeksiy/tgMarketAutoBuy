@@ -13,10 +13,10 @@ use wreq::{Client, Proxy};
 use wreq_util::Emulation;
 
 pub async fn run(pool: &PgPool, config: &AppConfig, viewer: ferogram::Client) -> Result<()> {
-    sync_telegram_collections(pool, &config, viewer).await.context("Failed to sync telegram collections")?;
+    sync_telegram_collections(pool, config, viewer).await.context("Failed to sync telegram collections")?;
     tracing::info!("Sync collections end");
 
-    update_floor_prices(pool, &config).await.context("Failed to update floor prices")?;
+    update_floor_prices(pool, config).await.context("Failed to update floor prices")?;
     tracing::info!("Update end!");
 
     Ok(())
@@ -35,27 +35,22 @@ async fn sync_telegram_collections(pool: &PgPool, config: &AppConfig, viewer: fe
         StarGifts::NotModified => bail!("Star gifts not modified"),
         StarGifts::StarGifts(star_gifts) => {
             for star_gift in star_gifts.gifts {
-                match star_gift {
-                    StarGift::StarGift(star_gift) => {
-                        if let (Some(title), Some(_resale)) = (star_gift.title, star_gift.availability_resale) {
-                            if !existing_ids.contains(&star_gift.id) {
-                                let short_title: String = title
-                                    .to_lowercase()
-                                    .chars()
-                                    .filter(|char| char.is_alphanumeric())
-                                    .collect();
-                                let collection = Collection {
-                                    id: 0,
-                                    title,
-                                    short_title,
-                                    tg_id: star_gift.id,
-                                    active: false,
-                                };
-                                new_collections_for_save.push(collection);
-                            }
-                        }
-                    }
-                    _ => {}
+                if let StarGift::StarGift(star_gift) = star_gift
+                    && let (Some(title), Some(_resale)) = (star_gift.title, star_gift.availability_resale)
+                    && !existing_ids.contains(&star_gift.id) {
+                        let short_title: String = title
+                            .to_lowercase()
+                            .chars()
+                            .filter(|char| char.is_alphanumeric())
+                            .collect();
+                        let collection = Collection {
+                            id: 0,
+                            title,
+                            short_title,
+                            tg_id: star_gift.id,
+                            active: false,
+                        };
+                        new_collections_for_save.push(collection);
                 }
             }
         }
@@ -146,8 +141,8 @@ async fn update_floor_prices(pool: &PgPool, config: &AppConfig) -> Result<()> {
     // just multiplay on floor_in_ton (0.015 - price per star)
     let stars_rate = ton_price_in_dollars / config.star_price_per_dollar;
 
-    let models = get_all_models_item(&pool).await?;
-    let backdrops = get_all_backdrops_item(&pool).await?;
+    let models = get_all_models_item(pool).await?;
+    let backdrops = get_all_backdrops_item(pool).await?;
 
     let mut models_to_update = Vec::new();
     let mut backdrops_to_update = Vec::new();
@@ -184,21 +179,19 @@ async fn update_floor_prices(pool: &PgPool, config: &AppConfig) -> Result<()> {
             });
 
             let search_key = (collection.short_title.clone(), model_name.clone());
-            if let Some(model_db) = models.get(&search_key) {
-                if let Some(final_floor)
+            if let Some(model_db) = models.get(&search_key)
+                && let Some(final_floor)
                     = calculate_final_floor(config,
                                             p_floor,
                                             x_floor,
                                             model_db.floor_price, 
-                                            stars_rate) {
-                    if final_floor != model_db.floor_price {
+                                            stars_rate)
+                    && final_floor != model_db.floor_price {
                         models_to_update.push(PriceUpdateModel {
                             id: model_db.id,
                             new_floor: final_floor
                         });
                     }
-                }
-            }
         }
 
         for backdrop_name in unique_backdrops {
@@ -210,27 +203,25 @@ async fn update_floor_prices(pool: &PgPool, config: &AppConfig) -> Result<()> {
             });
 
             let search_key = (collection.short_title.clone(), backdrop_name.clone());
-            if let Some(backdrop_db) = backdrops.get(&search_key) {
-                if let Some(final_floor)
+            if let Some(backdrop_db) = backdrops.get(&search_key)
+                && let Some(final_floor)
                     = calculate_final_floor(config,
                                             // p_floor,
                                             None,
                                             x_floor,
                                             backdrop_db.floor_price,
-                                            stars_rate) {
-                    if final_floor != backdrop_db.floor_price {
+                                            stars_rate)
+                    && final_floor != backdrop_db.floor_price {
                         backdrops_to_update.push(PriceUpdateBackdrop {
                             id: backdrop_db.id,
                             new_floor: final_floor
                         });
                     }
-                }
-            }
         }
     }
 
-    bulk_update_models(&pool, models_to_update).await?;
-    bulk_update_backdrops(&pool, backdrops_to_update).await?;
+    bulk_update_models(pool, models_to_update).await?;
+    bulk_update_backdrops(pool, backdrops_to_update).await?;
 
     Ok(())
 }
@@ -275,14 +266,13 @@ async fn get_portals_collections(client: &Client, short_titles: String)
     -> Result<PortalsResponseMap> {
     let mut portals_url
         = "https://portal-market.com/api/collections/filters?short_names=".to_string();
-    portals_url.push_str(&*short_titles);
+    portals_url.push_str(&short_titles);
     println!("{portals_url}");
     for _ in 0..5 {
-        if let Ok(response) = client.get(&portals_url).timeout(Duration::from_secs(30)).send().await {
-            if let Ok(portals_response) = response.json::<PortalsResponse>().await {
+        if let Ok(response) = client.get(&portals_url).timeout(Duration::from_secs(30)).send().await
+            && let Ok(portals_response) = response.json::<PortalsResponse>().await {
                 return Ok(portals_response.into_map());
             }
-        }
         tokio::time::sleep(Duration::from_secs(2)).await;
     }
     tracing::error!("Can't get response from portals");
@@ -292,7 +282,7 @@ async fn get_portals_collections(client: &Client, short_titles: String)
 async fn get_x_gift_collection(client: &Client, short_title: &str)
     -> Result<XGiftResponseMap> {
     let mut x_gift_url = "https://bot.xgift.tg/gifts/filters/".to_string();
-    x_gift_url.push_str(&short_title);
+    x_gift_url.push_str(short_title);
     x_gift_url.push_str("?collectionType=upgradable");
 
     for _ in 0..2 {
@@ -320,9 +310,9 @@ async fn get_gram_price(client: &Client) -> Result<f32> {
 
 async fn get_gram_price_from_ton_api(client: &Client) -> Result<f32> {
     let url = "https://tonapi.io/v2/rates?tokens=gram&currencies=usd";
-    if let Ok(response) = client.get(url).send().await {
-        if let Ok(data) = response.json::<TonApiResponse>().await {
-            if let Some(gram_data) = data.rates.get("GRAM") {
+    if let Ok(response) = client.get(url).send().await
+        && let Ok(data) = response.json::<TonApiResponse>().await
+            && let Some(gram_data) = data.rates.get("GRAM") {
                 let price_usd = gram_data.prices.usd;
 
                 let diff_24h_val = parse_diff_string(&gram_data.diff_24h.usd);
@@ -333,8 +323,6 @@ async fn get_gram_price_from_ton_api(client: &Client) -> Result<f32> {
                 let final_price = price_usd - (price_usd * (avg_diff / 100.0));
                 return Ok(final_price)
             }
-        }
-    }
     bail!("Can't get GRAM price from TonApi")
 }
 
