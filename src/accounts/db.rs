@@ -137,3 +137,18 @@ pub async fn get_account_by_id(pg_pool: &PgPool, id: i32) -> Result<Option<Accou
 
     Ok(account)
 }
+
+pub async fn get_collection_stickers_by_gift_id(pg_pool: &PgPool, gift_id: i64)
+    -> Result<Vec<i64>, sqlx::Error> {
+    let row = sqlx::query_scalar!(
+        r#"
+        SELECT ARRAY_AGG(m.sticker_id) as "sticker_ids"
+        FROM models as m
+        JOIN collections AS c ON m.collection_id = c.id
+        WHERE c.tg_id = $1
+        "#,
+        gift_id
+    ).fetch_optional(pg_pool).await?;
+
+    Ok(row.flatten().unwrap_or_default())
+}

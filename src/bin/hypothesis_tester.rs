@@ -9,7 +9,7 @@ use std::env;
 use std::sync::atomic::{AtomicBool, AtomicUsize, Ordering};
 use std::sync::Arc;
 use std::time::{Duration, Instant};
-use tg_market_autobuy::accounts::db::{get_account_by_id, get_active_accounts, get_active_collection_stickers, Account, AccountRole};
+use tg_market_autobuy::accounts::db::{get_account_by_id, get_active_accounts, get_collection_stickers_by_gift_id, Account, AccountRole};
 use tg_market_autobuy::config::AppConfig;
 use tokio::time::sleep;
 
@@ -33,8 +33,10 @@ struct HypothesisDef {
 
 #[derive(Debug, Clone)]
 struct HypothesisResult {
-    id: usize,
-    name: &'static str,
+    gift_slug: String,
+    gift_title: String,
+    hypothesis_id: usize,
+    hypothesis_name: &'static str,
     combos_count: usize,
     warmup_time_ms: u128,
     detection_latency_ms: Option<u128>,
@@ -252,7 +254,7 @@ async fn main() -> Result<()> {
 
     let args: Vec<String> = env::args().collect();
     let test_price: i64 = get_arg_value(&args, "--price").and_then(|s| s.parse().ok()).unwrap_or(50_000);
-    let cooldown_secs: u64 = get_arg_value(&args, "--cooldown").and_then(|s| s.parse().ok()).unwrap_or(900); // 15 min default
+    let cooldown_secs: u64 = get_arg_value(&args, "--cooldown").and_then(|s| s.parse().ok()).unwrap_or(600); // 10 min default
     let timeout_secs: u64 = get_arg_value(&args, "--timeout").and_then(|s| s.parse().ok()).unwrap_or(180);
     let poll_interval_ms: u64 = get_arg_value(&args, "--poll-ms").and_then(|s| s.parse().ok()).unwrap_or(1610);
     let target_slug_filter = get_arg_value(&args, "--slug");
@@ -323,7 +325,6 @@ async fn main() -> Result<()> {
     for (i, v_acc) in viewer_accs.iter().enumerate() {
         match connect_account_with_proxy(v_acc, &config, proxy_arg.as_deref(), socks5_arg.as_deref()).await {
             Ok(cli) => {
-                println!("  Viewer #{} (ID: {}, Phone: {:?}) connected", i + 1, v_acc.id, v_acc.phone);
                 viewers.push(cli);
             }
             Err(e) => {
@@ -331,6 +332,7 @@ async fn main() -> Result<()> {
             }
         }
     }
+    println!("  ✓ Successfully connected {} viewer(s) ready for benchmarking.", viewers.len());
 
     if viewers.is_empty() {
         bail!("Failed to connect any viewer clients!");
@@ -443,22 +445,17 @@ async fn main() -> Result<()> {
         return Ok(());
     }
 
-    // Select target gift
-    let target_gift = if let Some(ref slug) = target_slug_filter {
-        owned_unique_gifts.iter().find(|g| &g.slug == slug)
+    // Determine target gifts: either specific slug OR ALL unique gifts owned by the buyer!
+    let target_gifts: Vec<TestGiftInfo> = if let Some(ref slug) = target_slug_filter {
+        let g = owned_unique_gifts.iter().find(|g| &g.slug == slug)
             .with_context(|| format!("Gift with slug '{}' not found in buyer's inventory", slug))?
-            .clone()
+            .clone();
+        vec![g]
     } else {
-        owned_unique_gifts[0].clone()
+        println!("\n[Multi-Gift Mode] All {} Unique Gift(s) on Account #{} will participate in benchmarking!",
+            owned_unique_gifts.len(), buyer_acc.id);
+        owned_unique_gifts.clone()
     };
-
-    println!("\nTarget Gift Selected for Benchmarking:");
-    println!("  Title:       {}", target_gift.title);
-    println!("  Slug:        {}", target_gift.slug);
-    println!("  Number:      #{}", target_gift.num);
-    println!("  Gift ID:     {}", target_gift.gift_id);
-    println!("  Sticker ID:  {:?}", target_gift.sticker_id);
-    println!("  Test Price:  {} stars", test_price);
 
     // Setup Ctrl+C emergency delisting handler
     let active_listed_slug = Arc::new(std::sync::Mutex::new(None::<String>));
@@ -477,22 +474,6 @@ async fn main() -> Result<()> {
         std::process::exit(0);
     });
 
-    // If currently listed, delist it first!
-    if target_gift.currently_listed {
-        println!("\n[Warn] Target gift is currently listed! Delisting it first before running tests...");
-        delist_gift(&buyer_client, &target_gift.slug).await?;
-        println!("[Delisted] Done. (Note: Telegram cache might need cooldown if it was listed recently).");
-    }
-
-    // Fetch collection stickers from DB
-    let collections = get_active_collection_stickers(&pg_pool).await?;
-    let all_stickers = collections.iter()
-        .find(|c| c.gift_id == target_gift.gift_id)
-        .map(|c| c.sticker_ids.clone())
-        .unwrap_or_default();
-
-    println!("  Collection Models in DB: {} stickers", all_stickers.len());
-
     let hypotheses_to_test: Vec<&HypothesisDef> = HYPOTHESES.iter()
         .filter(|h| {
             if let Some(ref list) = chosen_hypotheses {
@@ -509,271 +490,294 @@ async fn main() -> Result<()> {
     }
 
     let viewers_arc: Arc<[Client]> = Arc::from(viewers.into_boxed_slice());
-    let mut results: Vec<HypothesisResult> = Vec::new();
+    let mut all_results: Vec<HypothesisResult> = Vec::new();
 
-    for (test_idx, hyp) in hypotheses_to_test.iter().enumerate() {
+    let total_tests_count = target_gifts.len() * hypotheses_to_test.len();
+    let mut current_test_number = 0;
+
+    for (gift_idx, target_gift) in target_gifts.iter().enumerate() {
         println!("\n============================================================================");
-        println!("RUNNING TEST {}/{}: {}", test_idx + 1, hypotheses_to_test.len(), hyp.name);
-        println!("Description: {}", hyp.description);
+        println!("  TESTING GIFT {}/{}: {} (#{}) | Slug: {}",
+            gift_idx + 1, target_gifts.len(), target_gift.title, target_gift.num, target_gift.slug);
         println!("============================================================================");
 
-        // Generate combinations for this hypothesis
-        let requests = (hyp.generator)(target_gift.gift_id, &all_stickers, target_gift.sticker_id);
-        let combos_count = requests.len();
-        println!("[Combos] Generated {} requests for this hypothesis.", combos_count);
-
-        let requests_arc: Arc<[GetResaleStarGifts]> = Arc::from(requests.into_boxed_slice());
-
-        // -------------------------------------------------------------
-        // STEP 1: WARMUP CYCLE (Ensure 1 full round of cached queries)
-        // -------------------------------------------------------------
-        println!("[Warmup] Executing 1 full round across all {} combos so Telegram server caches them...", combos_count);
-        let warmup_start = Instant::now();
-        execute_warmup_round(&viewers_arc, &requests_arc, poll_interval_ms).await;
-        let warmup_duration = warmup_start.elapsed();
-        println!("[Warmup] Complete in {:.2}s. All combos pre-cached on Telegram servers.", warmup_duration.as_secs_f64());
-
-        // Ensure small sync gap before listing
-        sleep(Duration::from_millis(500)).await;
-
-        // -------------------------------------------------------------
-        // STEP 2: BUYER LISTS THE GIFT
-        // -------------------------------------------------------------
-        let mut actual_list_price = test_price;
-        let mut list_succeeded = false;
-
-        while actual_list_price >= 1_000 {
-            println!("[Action] Buyer listing gift '{}' for {} stars...", target_gift.slug, actual_list_price);
-            let list_res = buyer_client.invoke(&UpdateStarGiftPrice {
-                stargift: InputSavedStarGift::Slug(InputSavedStarGiftSlug {
-                    slug: target_gift.slug.clone(),
-                }),
-                resell_amount: StarsAmount::StarsAmount(StarsAmountData {
-                    amount: actual_list_price,
-                    nanos: 0,
-                }),
-            }).await;
-
-            match list_res {
-                Ok(_) => {
-                    list_succeeded = true;
-                    break;
-                }
-                Err(InvocationError::Rpc(ref rpc_err)) if rpc_err.name == "RESELL_STARS_TOO_MUCH" => {
-                    let next_price = if actual_list_price > 100_000 {
-                        100_000
-                    } else if actual_list_price > 50_000 {
-                        50_000
-                    } else if actual_list_price > 25_000 {
-                        25_000
-                    } else if actual_list_price > 10_000 {
-                        10_000
-                    } else if actual_list_price > 5_000 {
-                        5_000
-                    } else {
-                        1_000
-                    };
-                    println!("[Price Adj] {} stars exceeds Telegram's limit (RESELL_STARS_TOO_MUCH). Stepping down to {} stars...", actual_list_price, next_price);
-                    actual_list_price = next_price;
-                }
-                Err(e) => {
-                    eprintln!("[Error] Failed to list gift: {e:#}");
-                    break;
-                }
-            }
+        // If currently listed, delist it first!
+        if target_gift.currently_listed {
+            println!("\n[Warn] Target gift '{}' is currently listed! Delisting it first before running tests...", target_gift.slug);
+            delist_gift(&buyer_client, &target_gift.slug).await?;
+            println!("[Delisted] Done.");
         }
 
-        if !list_succeeded {
-            eprintln!("Skipping hypothesis due to listing error.");
-            continue;
-        }
+        // Fetch collection stickers from DB for this gift (regardless of collection active flag)
+        let all_stickers = get_collection_stickers_by_gift_id(&pg_pool, target_gift.gift_id).await?;
+        println!("  Collection Models in DB: {} stickers for collection tg_id {}", all_stickers.len(), target_gift.gift_id);
 
-        // Register listed gift for emergency Ctrl+C cleanup
-        *active_listed_slug.lock().unwrap() = Some(target_gift.slug.clone());
+        for hyp in &hypotheses_to_test {
+            current_test_number += 1;
+            println!("\n----------------------------------------------------------------------------");
+            println!("RUNNING TEST {}/{}: Gift '{}' on {}",
+                current_test_number, total_tests_count, target_gift.slug, hyp.name);
+            println!("Description: {}", hyp.description);
+            println!("----------------------------------------------------------------------------");
 
-        let t_listed = Instant::now();
-        println!("[Action] Gift listed at t=0ms! Viewers are now polling to measure detection latency...");
+            // Generate combinations for this hypothesis
+            let requests = (hyp.generator)(target_gift.gift_id, &all_stickers, target_gift.sticker_id);
+            let combos_count = requests.len();
+            println!("[Combos] Generated {} requests for this hypothesis.", combos_count);
 
-        // -------------------------------------------------------------
-        // STEP 3: DETECTION POLLING LOOP
-        // -------------------------------------------------------------
-        let detected = Arc::new(AtomicBool::new(false));
-        let total_requests_done = Arc::new(AtomicUsize::new(0));
-        let detected_viewer_idx = Arc::new(AtomicUsize::new(0));
-        let detected_combo_idx = Arc::new(AtomicUsize::new(0));
-        let detection_latency_ms = Arc::new(AtomicUsize::new(0));
+            let requests_arc: Arc<[GetResaleStarGifts]> = Arc::from(requests.into_boxed_slice());
 
-        let num_viewers = viewers_arc.len();
-        let timeout_duration = Duration::from_secs(timeout_secs);
-        let poll_interval = Duration::from_millis(poll_interval_ms);
+            // -------------------------------------------------------------
+            // STEP 1: WARMUP CYCLE (Ensure 1 full round of cached queries across all 100 viewers)
+            // -------------------------------------------------------------
+            let warmup_start = Instant::now();
+            execute_warmup_round(&viewers_arc, &requests_arc, poll_interval_ms).await;
+            let warmup_duration = warmup_start.elapsed();
+            println!("[Warmup] Complete in {:.2}s. All combos pre-cached on Telegram servers.", warmup_duration.as_secs_f64());
 
-        let mut handles = Vec::with_capacity(num_viewers);
+            // Ensure small sync gap before listing
+            sleep(Duration::from_millis(500)).await;
 
-        for viewer_idx in 0..num_viewers {
-            let client = viewers_arc[viewer_idx].clone();
-            let reqs = Arc::clone(&requests_arc);
-            let is_detected = Arc::clone(&detected);
-            let req_counter = Arc::clone(&total_requests_done);
-            let det_viewer = Arc::clone(&detected_viewer_idx);
-            let det_combo = Arc::clone(&detected_combo_idx);
-            let det_latency = Arc::clone(&detection_latency_ms);
-            let target_slug = target_gift.slug.clone();
+            // -------------------------------------------------------------
+            // STEP 2: BUYER LISTS THE GIFT (With auto step-down retry)
+            // -------------------------------------------------------------
+            let mut actual_list_price = test_price;
+            let mut list_succeeded = false;
 
-            // Stagger viewers across the poll interval
-            let stagger = poll_interval.mul_f64(viewer_idx as f64 / num_viewers as f64);
+            while actual_list_price >= 1_000 {
+                println!("[Action] Buyer listing gift '{}' for {} stars...", target_gift.slug, actual_list_price);
+                let list_res = buyer_client.invoke(&UpdateStarGiftPrice {
+                    stargift: InputSavedStarGift::Slug(InputSavedStarGiftSlug {
+                        slug: target_gift.slug.clone(),
+                    }),
+                    resell_amount: StarsAmount::StarsAmount(StarsAmountData {
+                        amount: actual_list_price,
+                        nanos: 0,
+                    }),
+                }).await;
 
-            let handle = tokio::spawn(async move {
-                sleep(stagger).await;
-                let mut interval = tokio::time::interval(poll_interval);
-                interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
-
-                let mut local_idx = viewer_idx;
-                while !is_detected.load(Ordering::Relaxed) && t_listed.elapsed() < timeout_duration {
-                    interval.tick().await;
-                    if is_detected.load(Ordering::Relaxed) {
+                match list_res {
+                    Ok(_) => {
+                        list_succeeded = true;
                         break;
                     }
+                    Err(InvocationError::Rpc(ref rpc_err)) if rpc_err.name == "RESELL_STARS_TOO_MUCH" => {
+                        let next_price = if actual_list_price > 100_000 {
+                            100_000
+                        } else if actual_list_price > 50_000 {
+                            50_000
+                        } else if actual_list_price > 25_000 {
+                            25_000
+                        } else if actual_list_price > 10_000 {
+                            10_000
+                        } else if actual_list_price > 5_000 {
+                            5_000
+                        } else {
+                            1_000
+                        };
+                        println!("[Price Adj] {} stars exceeds Telegram's limit (RESELL_STARS_TOO_MUCH). Stepping down to {} stars...", actual_list_price, next_price);
+                        actual_list_price = next_price;
+                    }
+                    Err(e) => {
+                        eprintln!("[Error] Failed to list gift: {e:#}");
+                        break;
+                    }
+                }
+            }
 
-                    let combo_idx = local_idx % reqs.len();
-                    local_idx += num_viewers;
-                    let req_num = req_counter.fetch_add(1, Ordering::Relaxed) + 1;
+            if !list_succeeded {
+                eprintln!("Skipping hypothesis due to listing error.");
+                continue;
+            }
 
-                    let res = client.invoke(&reqs[combo_idx]).await;
-                    match res {
-                        Ok(ResaleStarGifts::ResaleStarGifts(resale)) => {
-                            for gift in resale.gifts {
-                                if let StarGift::Unique(unique) = gift
-                                    && unique.slug == target_slug {
-                                    let elapsed = t_listed.elapsed();
-                                    det_latency.store(elapsed.as_millis() as usize, Ordering::SeqCst);
-                                    det_viewer.store(viewer_idx + 1, Ordering::SeqCst);
-                                    det_combo.store(combo_idx, Ordering::SeqCst);
-                                    is_detected.store(true, Ordering::SeqCst);
-                                    println!(
-                                        "\n>>> [TARGET FOUND!] Detected by Viewer #{} on combo #{} after {:.2}s ({} ms, request #{}) <<<",
-                                        viewer_idx + 1,
-                                        combo_idx,
-                                        elapsed.as_secs_f64(),
-                                        elapsed.as_millis(),
-                                        req_num
-                                    );
-                                    return;
+            // Register listed gift for emergency Ctrl+C cleanup
+            *active_listed_slug.lock().unwrap() = Some(target_gift.slug.clone());
+
+            let t_listed = Instant::now();
+            println!("[Action] Gift '{}' listed at t=0ms! Viewers are now polling to measure detection latency...", target_gift.slug);
+
+            // -------------------------------------------------------------
+            // STEP 3: DETECTION POLLING LOOP
+            // -------------------------------------------------------------
+            let detected = Arc::new(AtomicBool::new(false));
+            let total_requests_done = Arc::new(AtomicUsize::new(0));
+            let detected_viewer_idx = Arc::new(AtomicUsize::new(0));
+            let detected_combo_idx = Arc::new(AtomicUsize::new(0));
+            let detection_latency_ms = Arc::new(AtomicUsize::new(0));
+
+            let num_viewers = viewers_arc.len();
+            let timeout_duration = Duration::from_secs(timeout_secs);
+            let poll_interval = Duration::from_millis(poll_interval_ms);
+
+            let mut handles = Vec::with_capacity(num_viewers);
+
+            for viewer_idx in 0..num_viewers {
+                let client = viewers_arc[viewer_idx].clone();
+                let reqs = Arc::clone(&requests_arc);
+                let is_detected = Arc::clone(&detected);
+                let req_counter = Arc::clone(&total_requests_done);
+                let det_viewer = Arc::clone(&detected_viewer_idx);
+                let det_combo = Arc::clone(&detected_combo_idx);
+                let det_latency = Arc::clone(&detection_latency_ms);
+                let target_slug = target_gift.slug.clone();
+
+                let stagger = poll_interval.mul_f64(viewer_idx as f64 / num_viewers as f64);
+
+                let handle = tokio::spawn(async move {
+                    sleep(stagger).await;
+                    let mut interval = tokio::time::interval(poll_interval);
+                    interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+                    let mut local_idx = viewer_idx;
+                    while !is_detected.load(Ordering::Relaxed) && t_listed.elapsed() < timeout_duration {
+                        interval.tick().await;
+                        if is_detected.load(Ordering::Relaxed) {
+                            break;
+                        }
+
+                        let combo_idx = local_idx % reqs.len();
+                        local_idx += num_viewers;
+                        let req_num = req_counter.fetch_add(1, Ordering::Relaxed) + 1;
+
+                        let res = client.invoke(&reqs[combo_idx]).await;
+                        match res {
+                            Ok(ResaleStarGifts::ResaleStarGifts(resale)) => {
+                                for gift in resale.gifts {
+                                    if let StarGift::Unique(unique) = gift
+                                        && unique.slug == target_slug {
+                                        let elapsed = t_listed.elapsed();
+                                        det_latency.store(elapsed.as_millis() as usize, Ordering::SeqCst);
+                                        det_viewer.store(viewer_idx + 1, Ordering::SeqCst);
+                                        det_combo.store(combo_idx, Ordering::SeqCst);
+                                        is_detected.store(true, Ordering::SeqCst);
+                                        println!(
+                                            "\n>>> [TARGET FOUND!] Detected by Viewer #{} on combo #{} after {:.2}s ({} ms, request #{}) <<<",
+                                            viewer_idx + 1,
+                                            combo_idx,
+                                            elapsed.as_secs_f64(),
+                                            elapsed.as_millis(),
+                                            req_num
+                                        );
+                                        return;
+                                    }
+                                }
+                            }
+                            Err(e) => {
+                                if let Some(sec) = e.flood_wait_seconds() {
+                                    eprintln!("[FloodWait] Viewer #{} received flood wait {}s", viewer_idx + 1, sec);
+                                    sleep(Duration::from_secs(sec + 1)).await;
                                 }
                             }
                         }
-                        Err(e) => {
-                            if let Some(sec) = e.flood_wait_seconds() {
-                                eprintln!("[FloodWait] Viewer #{} received flood wait {}s", viewer_idx + 1, sec);
-                                sleep(Duration::from_secs(sec + 1)).await;
-                            }
-                        }
                     }
+                });
+                handles.push(handle);
+            }
+
+            // Wait for detection or timeout
+            loop {
+                if detected.load(Ordering::Relaxed) {
+                    break;
                 }
+                if t_listed.elapsed() >= timeout_duration {
+                    println!("\n[TIMEOUT] Gift was not detected within {}s timeout!", timeout_secs);
+                    break;
+                }
+                sleep(Duration::from_millis(100)).await;
+            }
+
+            for h in handles {
+                h.abort();
+            }
+
+            let is_found = detected.load(Ordering::Relaxed);
+            let latency_ms = if is_found {
+                Some(detection_latency_ms.load(Ordering::Relaxed) as u128)
+            } else {
+                None
+            };
+
+            // -------------------------------------------------------------
+            // STEP 4: DELIST GIFT IMMEDIATELY
+            // -------------------------------------------------------------
+            println!("[Cleanup] Delisting gift '{}' from market...", target_gift.slug);
+            if let Err(e) = delist_gift(&buyer_client, &target_gift.slug).await {
+                eprintln!("[Critical Error] Failed to delist gift: {e:#}. Please manually remove it!");
+            } else {
+                println!("[Cleanup] Gift successfully removed from sale.");
+                *active_listed_slug.lock().unwrap() = None;
+            }
+
+            // Record result
+            all_results.push(HypothesisResult {
+                gift_slug: target_gift.slug.clone(),
+                gift_title: target_gift.title.clone(),
+                hypothesis_id: hyp.id,
+                hypothesis_name: hyp.name,
+                combos_count,
+                warmup_time_ms: warmup_duration.as_millis(),
+                detection_latency_ms: latency_ms,
+                detected_at_request: total_requests_done.load(Ordering::Relaxed),
+                detected_by_viewer: detected_viewer_idx.load(Ordering::Relaxed),
+                detected_combo_idx: detected_combo_idx.load(Ordering::Relaxed),
+                timed_out: !is_found,
             });
-            handles.push(handle);
-        }
 
-        // Wait for detection or timeout
-        loop {
-            if detected.load(Ordering::Relaxed) {
-                break;
+            // -------------------------------------------------------------
+            // STEP 5: 10-MINUTE COOLDOWN BETWEEN TESTS
+            // -------------------------------------------------------------
+            let has_next = current_test_number < total_tests_count;
+            if has_next && cooldown_secs > 0 {
+                println!("\n----------------------------------------------------------------------------");
+                println!("[COOLDOWN] Waiting {} seconds ({:.1} min) before starting next test...",
+                    cooldown_secs, cooldown_secs as f64 / 60.0);
+                println!("CRITICAL: Telegram requires cooldown between relisting to avoid server cache delays.");
+                println!("----------------------------------------------------------------------------");
+
+                let cooldown_start = Instant::now();
+                let total_cd = Duration::from_secs(cooldown_secs);
+
+                while cooldown_start.elapsed() < total_cd {
+                    let remaining = total_cd.saturating_sub(cooldown_start.elapsed());
+                    let rem_mins = remaining.as_secs() / 60;
+                    let rem_secs = remaining.as_secs() % 60;
+                    print!("\r[Cooldown Countdown] Next test in: {:02}m {:02}s ...   ", rem_mins, rem_secs);
+                    std::io::Write::flush(&mut std::io::stdout()).ok();
+                    sleep(Duration::from_secs(1)).await;
+                }
+                println!("\n[Cooldown] Cooldown finished! Ready for next test.\n");
             }
-            if t_listed.elapsed() >= timeout_duration {
-                println!("\n[TIMEOUT] Gift was not detected within {}s timeout!", timeout_secs);
-                break;
-            }
-            sleep(Duration::from_millis(100)).await;
-        }
-
-        for h in handles {
-            h.abort();
-        }
-
-        let is_found = detected.load(Ordering::Relaxed);
-        let latency_ms = if is_found {
-            Some(detection_latency_ms.load(Ordering::Relaxed) as u128)
-        } else {
-            None
-        };
-
-        // -------------------------------------------------------------
-        // STEP 4: DELIST GIFT IMMEDIATELY
-        // -------------------------------------------------------------
-        println!("[Cleanup] Delisting gift '{}' from market...", target_gift.slug);
-        if let Err(e) = delist_gift(&buyer_client, &target_gift.slug).await {
-            eprintln!("[Critical Error] Failed to delist gift: {e:#}. Please manually remove it!");
-        } else {
-            println!("[Cleanup] Gift successfully removed from sale.");
-            *active_listed_slug.lock().unwrap() = None;
-        }
-
-        // Record result
-        results.push(HypothesisResult {
-            id: hyp.id,
-            name: hyp.name,
-            combos_count,
-            warmup_time_ms: warmup_duration.as_millis(),
-            detection_latency_ms: latency_ms,
-            detected_at_request: total_requests_done.load(Ordering::Relaxed),
-            detected_by_viewer: detected_viewer_idx.load(Ordering::Relaxed),
-            detected_combo_idx: detected_combo_idx.load(Ordering::Relaxed),
-            timed_out: !is_found,
-        });
-
-        // -------------------------------------------------------------
-        // STEP 5: 15-MINUTE COOLDOWN BETWEEN TESTS
-        // -------------------------------------------------------------
-        let has_next = test_idx + 1 < hypotheses_to_test.len();
-        if has_next && cooldown_secs > 0 {
-            println!("\n----------------------------------------------------------------------------");
-            println!("[COOLDOWN] Waiting {} seconds ({:.1} min) before starting next hypothesis...",
-                cooldown_secs, cooldown_secs as f64 / 60.0);
-            println!("CRITICAL: Telegram requires >= 15 min between relisting to avoid server delay throttling.");
-            println!("----------------------------------------------------------------------------");
-
-            let cooldown_start = Instant::now();
-            let total_cd = Duration::from_secs(cooldown_secs);
-
-            while cooldown_start.elapsed() < total_cd {
-                let remaining = total_cd.saturating_sub(cooldown_start.elapsed());
-                let rem_mins = remaining.as_secs() / 60;
-                let rem_secs = remaining.as_secs() % 60;
-                print!("\r[Cooldown Countdown] Next hypothesis in: {:02}m {:02}s ...   ", rem_mins, rem_secs);
-                std::io::Write::flush(&mut std::io::stdout()).ok();
-                sleep(Duration::from_secs(1)).await;
-            }
-            println!("\n[Cooldown] Cooldown finished! Ready for next hypothesis.\n");
         }
     }
 
     // -------------------------------------------------------------
     // FINAL RESULTS & COMPARISON
     // -------------------------------------------------------------
-    println!("\n\n=========================================================================================");
-    println!("                           FINAL HYPOTHESIS BENCHMARK RESULTS                            ");
-    println!("=========================================================================================");
-    println!("{:<4} {:<36} {:<8} {:<12} {:<15} {:<10}", "ID", "Hypothesis Name", "Combos", "Warmup (s)", "Latency (ms)", "Status");
-    println!("{:-<90}", "");
+    println!("\n\n===============================================================================================================");
+    println!("                                      FINAL HYPOTHESIS BENCHMARK RESULTS                                       ");
+    println!("===============================================================================================================");
+    println!("{:<18} {:<4} {:<36} {:<8} {:<12} {:<15} {:<10}", "Gift", "ID", "Hypothesis Name", "Combos", "Warmup (s)", "Latency (ms)", "Status");
+    println!("{:-<110}", "");
 
-    for r in &results {
+    for r in &all_results {
         let warmup_str = format!("{:.2}", r.warmup_time_ms as f64 / 1000.0);
         let latency_str = match r.detection_latency_ms {
             Some(ms) => format!("{} ms ({:.2}s)", ms, ms as f64 / 1000.0),
             None => "TIMEOUT".to_string(),
         };
         let status = if r.timed_out { "TIMEOUT" } else { "DETECTED" };
-        println!("{:<4} {:<36} {:<8} {:<12} {:<15} {:<10}",
-            r.id, r.name, r.combos_count, warmup_str, latency_str, status);
+        println!("{:<18} {:<4} {:<36} {:<8} {:<12} {:<15} {:<10}",
+            format!("{} ({})", r.gift_title, r.gift_slug), r.hypothesis_id, r.hypothesis_name, r.combos_count, warmup_str, latency_str, status);
     }
-    println!("{:-<90}", "");
+    println!("{:-<110}", "");
 
-    // Identify the winner (fastest detected latency)
-    let winner = results.iter()
+    // Identify overall winner (fastest detected latency)
+    let winner = all_results.iter()
         .filter(|r| !r.timed_out && r.detection_latency_ms.is_some())
         .min_by_key(|r| r.detection_latency_ms.unwrap());
 
     if let Some(w) = winner {
-        println!("\n🏆 FASTEST HYPOTHESIS: {}", w.name);
+        println!("\n🏆 FASTEST HYPOTHESIS OVERALL: {} (on Gift '{}')", w.hypothesis_name, w.gift_slug);
         println!("   Latency:        {} ms ({:.3}s)", w.detection_latency_ms.unwrap(), w.detection_latency_ms.unwrap() as f64 / 1000.0);
         println!("   Combinations:   {}", w.combos_count);
         println!("   Caught on req:  #{} (Combo #{}, Viewer #{})", w.detected_at_request, w.detected_combo_idx, w.detected_by_viewer);
@@ -781,22 +785,66 @@ async fn main() -> Result<()> {
         println!("\nNo hypothesis succeeded in detecting the gift within the timeout.");
     }
 
-    println!("=========================================================================================\n");
+    println!("===============================================================================================================\n");
     Ok(())
 }
 
 async fn execute_warmup_round(viewers: &[Client], requests: &[GetResaleStarGifts], poll_ms: u64) {
     let n_viewers = viewers.len();
     let n_requests = requests.len();
-    let delay_between_warmup_reqs = Duration::from_millis((poll_ms / n_viewers as u64).max(50));
+    let total_warmup_items = n_requests.max(n_viewers);
 
-    for (i, req) in requests.iter().enumerate() {
-        let client = &viewers[i % n_viewers];
-        let _ = client.invoke(req).await;
-        if i + 1 < n_requests {
-            sleep(delay_between_warmup_reqs).await;
-        }
+    println!("[Warmup] Warming up all {} viewers across all {} combos ({} total warmup queries)...",
+        n_viewers, n_requests, total_warmup_items);
+
+    let counter = Arc::new(AtomicUsize::new(0));
+    let completed = Arc::new(AtomicUsize::new(0));
+    let viewers_active = Arc::new(AtomicUsize::new(0));
+
+    let poll_interval = Duration::from_millis(poll_ms);
+    let stagger_step = poll_interval.mul_f64(1.0 / n_viewers as f64);
+
+    let mut handles = Vec::with_capacity(n_viewers);
+
+    for viewer_idx in 0..n_viewers {
+        let client = viewers[viewer_idx].clone();
+        let counter_ref = Arc::clone(&counter);
+        let completed_ref = Arc::clone(&completed);
+        let viewers_active_ref = Arc::clone(&viewers_active);
+        let reqs = requests.to_vec();
+
+        let handle = tokio::spawn(async move {
+            sleep(stagger_step.mul_f64(viewer_idx as f64)).await;
+            let mut interval = tokio::time::interval(poll_interval);
+            interval.set_missed_tick_behavior(tokio::time::MissedTickBehavior::Skip);
+
+            let mut did_at_least_one = false;
+            loop {
+                let idx = counter_ref.fetch_add(1, Ordering::Relaxed);
+                if idx >= total_warmup_items && did_at_least_one {
+                    break;
+                }
+
+                interval.tick().await;
+                let combo_idx = idx % reqs.len();
+                let _ = client.invoke(&reqs[combo_idx]).await;
+                completed_ref.fetch_add(1, Ordering::Relaxed);
+
+                if !did_at_least_one {
+                    did_at_least_one = true;
+                    viewers_active_ref.fetch_add(1, Ordering::Relaxed);
+                }
+            }
+        });
+        handles.push(handle);
     }
+
+    for h in handles {
+        let _ = h.await;
+    }
+
+    println!("[Warmup] 100% complete: {} queries executed, all {} viewers engaged and warmed.",
+        completed.load(Ordering::Relaxed), viewers_active.load(Ordering::Relaxed));
 }
 
 async fn delist_gift(client: &Client, slug: &str) -> Result<()> {
