@@ -22,14 +22,10 @@ pub async fn build_targets_with_combos(pg_pool: &PgPool)
         if size == 0 {
             tracing::warn!("Gift id - {} DOESN'T HAVE STICKERS ID", collection_sticker.gift_id);
             combos.push(create_request(collection_sticker.gift_id, None));
+        } else if size == 1 {
+            combos.push(create_request(collection_sticker.gift_id, Some(vec![create_model_attr(collection_sticker.sticker_ids[0])])));
         } else {
-            // 1. All attributes
-            let all_attrs = collection_sticker.sticker_ids.iter()
-                .map(|&id| create_model_attr(id))
-                .collect();
-            combos.push(create_request(collection_sticker.gift_id, Some(all_attrs)));
-
-            // 2. Skip 1 attribute (size combinations) - gives full coverage while keeping cycle time fast
+            // 1. Skip 1 attribute (size combinations) - gives full coverage while keeping cycle time fast
             for skip in 0..size {
                 let mut attrs = Vec::with_capacity(size - 1);
                 for (j, &id) in collection_sticker.sticker_ids.iter().enumerate() {
@@ -38,7 +34,7 @@ pub async fn build_targets_with_combos(pg_pool: &PgPool)
                 combos.push(create_request(collection_sticker.gift_id, Some(attrs)));
             }
 
-            // 3. Skip 2 attributes (adjacent pairs and opposite pairs)
+            // 2. Skip 2 attributes (adjacent pairs and opposite pairs)
             // Provides extra cache diversity without causing combinatorial explosion
             if size >= 4 {
                 // Adjacent pairs
@@ -62,9 +58,6 @@ pub async fn build_targets_with_combos(pg_pool: &PgPool)
                     combos.push(create_request(collection_sticker.gift_id, Some(attrs)));
                 }
             }
-
-            // 4. Request without attributes
-            combos.push(create_request(collection_sticker.gift_id, None));
         }
         total_combinations += combos.len();
         all_targets.push(Arc::from(combos));
