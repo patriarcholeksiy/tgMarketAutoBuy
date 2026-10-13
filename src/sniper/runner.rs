@@ -171,8 +171,19 @@ fn spawn_viewer_task(
                         .unwrap_or(&default_fallback_price)
                 };
 
-                if SniperStrategy::should_buy(floor_price, parsed.price_in_stars, num, den) {
-                    tracing::info!("Find gift {} with price {}", parsed.slug, parsed.price_in_stars);
+                let is_stars = parsed.is_stars();
+                let effective_price_stars = match parsed.price_in_stars {
+                    Some(stars) => stars,
+                    None => continue,
+                };
+
+                if SniperStrategy::should_buy(floor_price, effective_price_stars, num, den) {
+                    tracing::info!(
+                        "Find gift {} with price {} (is_stars: {})",
+                        parsed.slug,
+                        effective_price_stars,
+                        is_stars
+                    );
 
                     let gift_trace_id = index;
                     tracing::info!(
@@ -184,13 +195,15 @@ fn spawn_viewer_task(
                         combo_index,
                         sticker_id = parsed.sticker_id,
                         backdrop_id = parsed.backdrop_id,
-                        price_in_stars = parsed.price_in_stars,
+                        price_in_stars = effective_price_stars,
                         price_in_ton = parsed.price_in_ton,
+                        is_stars,
+                        resale_ton_only = parsed.resale_ton_only,
                         floor_price,
                         "Gift matched sniper strategy"
                     );
 
-                    let price_in_ton = parsed.price_in_ton;
+                    let price_in_ton = parsed.price_in_ton.unwrap_or(0);
                     let slug = parsed.slug;
                     let buyers = Arc::clone(&context.acc_pool.buyers);
 
@@ -206,7 +219,7 @@ fn spawn_viewer_task(
                         for (buyer_client, buyer_peer) in buyers.iter() {
                             let buyer_client = buyer_client.clone();
                             let invoice = InputInvoiceStarGiftResale {
-                                ton: true,
+                                ton: !is_stars,
                                 slug: slug.clone(),
                                 to_id: buyer_peer.clone(),
                             };
@@ -246,16 +259,34 @@ fn spawn_viewer_task(
                                     return;
                                 };
 
-                                tracing::info!("Buyer successfully obtained payment form {} for {slug_c}", form.form_id);
+                                tracing::info!(
+                                    "Buyer successfully obtained payment form {} for {slug_c} (currency: {}, amount: {}, is_stars: {})",
+                                    form.form_id,
+                                    form_invoice.currency,
+                                    price.amount,
+                                    is_stars
+                                );
 
-                                if price_in_ton + AppConfig::MAX_SLIPPAGE_NANO_TON < price.amount {
-                                    tracing::warn!(
-                                        "Price in payment_form changed for {slug_c}, {} < {}, currency {}",
-                                        price_in_ton,
-                                        price.amount,
-                                        form_invoice.currency
-                                    );
-                                    return;
+                                if is_stars {
+                                    if price.amount > effective_price_stars {
+                                        tracing::warn!(
+                                            "Price in payment_form changed for {slug_c}, {} > expected {}, currency {}",
+                                            price.amount,
+                                            effective_price_stars,
+                                            form_invoice.currency
+                                        );
+                                        return;
+                                    }
+                                } else {
+                                    if price_in_ton + AppConfig::MAX_SLIPPAGE_NANO_TON < price.amount {
+                                        tracing::warn!(
+                                            "Price in payment_form changed for {slug_c}, {} < {}, currency {}",
+                                            price_in_ton,
+                                            price.amount,
+                                            form_invoice.currency
+                                        );
+                                        return;
+                                    }
                                 }
 
                                 // Ensure only one buyer proceeds to SendStarsForm
@@ -263,7 +294,11 @@ fn spawn_viewer_task(
                                     return;
                                 }
 
-                                tracing::info!("Buyer submitting SendStarsForm for {slug_c} with form_id {}", form.form_id);
+                                tracing::info!(
+                                    "Buyer submitting SendStarsForm for {slug_c} with form_id {} (paying in {})",
+                                    form.form_id,
+                                    if is_stars { "Stars" } else { "TON" }
+                                );
 
                                 let req = functions::payments::SendStarsForm {
                                     form_id: form.form_id,
